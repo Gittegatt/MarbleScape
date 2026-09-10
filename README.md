@@ -313,27 +313,33 @@ Earth mask, regardless of the selected render mode.
 
 Select a projection in the **View** section of **Settings**, or using
 `view.projection` in the configuration. By default, Settings shows Geographic
-and the three GEOS projections:
+and two GEOS projections:
 
 - `Geographic` (EPSG:4326)
 - `GEOS: MSG FES, MTG FD` (geostationary, centered at 0 degrees)
 - `GEOS: MSG RSS` (geostationary, centered at 9.5 degrees east)
-- `GEOS: MSG IODC` (geostationary, centered at 41.5 degrees east)
 
 Check **Unlock experimental projections**, directly below **Black TrueColor
 night side**, to also show:
 
+- `GEOS: MSG IODC` (geostationary, centered at 41.5 degrees east)
 - `Spherical Mercator` (EPSG:3857)
 - `North Polar` (EPSG:3995)
 - `South Polar` (EPSG:3976)
+
+IODC is grouped here because combining it with MTG layers can expose areas
+outside their image coverage, where the basemap remains visible. This is an
+application compatibility precaution, not an experimental status of IODC itself.
 
 Definitions follow the [EUMETSAT viewer configuration](https://view.eumetsat.int/assets/data/config.json).
 The checkbox is saved as `view.unlock_experimental_projections` (default
 `false`) and included in JSON backups. Unchecking it while an experimental
 projection is selected resets the draft view to GEOS at 0 degrees / Full Earth.
 Use **Apply** or **OK** to save; **Cancel** discards these changes. Older
-configurations with an experimental projection already selected retain it
-and open with the checkbox checked.
+configurations without the unlock setting retain an already selected experimental
+projection and open with the checkbox checked. If the setting is explicitly
+`false`, selecting any experimental projection in TOML also requires setting it
+to `true`.
 
 Changing projection in the UI selects `full_earth`, resets zoom to `1.1`, and
 uses `fit` (`crop` for Geographic, to stay within valid latitude/longitude

@@ -274,7 +274,7 @@ PROJECTIONS = {
 }
 
 EXPERIMENTAL_PROJECTIONS = frozenset({
-    "Spherical Mercator", "North Polar", "South Polar",
+    "GEOS: MSG IODC", "Spherical Mercator", "North Polar", "South Polar",
 })
 
 
