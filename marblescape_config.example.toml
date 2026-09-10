@@ -1,0 +1,127 @@
+# MarbleScape wallpaper configuration
+# Layer order is bottom to top. Restart the application after manual changes.
+
+[service]
+endpoint = "https://view.eumetsat.int/geoserver/wms"
+version = "1.3.0"
+time = ""                       # Empty selects the latest available imagery.
+update_interval_minutes = 5.0
+timeout_seconds = 90
+run_continuously = true
+render_mode = "auto"            # auto, server, or local
+
+[output]
+latest_folder = ""             # Empty = root/latest; relative to the script folder.
+width = 2560
+height = 0                      # 0 derives height from aspect_ratio.
+aspect_ratio = "16:9"
+render_scale = "auto"           # Auto (max useful); or 1.0, 1.25, 1.5, 2.0.
+background_color = "#000000"
+windows_root = "."              # Relative to the application folder; absolute is allowed.
+linux_root = "."
+
+[view]
+# Available projections: Geographic, GEOS: MSG FES, MTG FD, GEOS: MSG RSS,
+# GEOS: MSG IODC, Spherical Mercator, North Polar, South Polar.
+# Regional presets still use Geographic. Other projections apply to full_earth
+# or custom. Use fit_mode="crop" for Geographic full_earth at screen ratios.
+projection = "GEOS: MSG FES, MTG FD"
+preset = "full_earth"           # full_earth, europe, mediterranean,
+                                # central_europe, or custom
+fit_mode = "fit"                # fit or crop
+zoom = 1.1
+truecolor_black_night = false  # Applies only to MTG TrueColor.
+unlock_experimental_projections = false  # Show Mercator and polar choices in Settings.
+# For preset="custom", use logical x/y order in the selected projection:
+# bbox = [-6500000.0, -6500000.0, 6500000.0, 6500000.0]
+# With projection="Geographic": bbox = [west, south, east, north]
+
+[history]
+folder = ""                    # Empty = root/history; relative to the script folder.
+enabled = false
+retention_mode = "count"        # count, time, or both
+max_files = 100
+years = 0
+months = 0
+days = 1
+hours = 0
+minutes = 0
+
+[windows]
+set_wallpaper = true
+position = "fit"                # center, tile, stretch, fit, fill, or span
+pause_on_error = true
+
+# Friendly basemap choices. Normally enable exactly one.
+[[layers]]
+kind = "basemap"
+name = "Natural Earth"
+enabled = true
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "basemap"
+name = "OSM Dark"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "basemap"
+name = "OSM Light"
+enabled = false
+opacity = 1.0
+style = ""
+
+# Exact WMS product names come from --list-layers or --export-layers.
+[[layers]]
+kind = "wms"
+name = "mtg_fd:rgb_geocolour"
+enabled = true
+opacity = 1.0
+style = ""
+# time = "latest"               # Or an ISO-8601 archive timestamp.
+
+# Friendly overlay choices.
+[[layers]]
+kind = "overlay"
+name = "Coastlines"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Boundaries"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Labels (dark)"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Labels (light)"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Graticules (dark)"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Graticules (light)"
+enabled = false
+opacity = 1.0
+style = ""

@@ -1,0 +1,43 @@
+# Local configuration
+/marblescape_config.toml
+# Legacy configuration files still supported by automatic migration
+/earthscape_config.toml
+/satscape_config.toml
+/eumetview_config.toml
+
+# Runtime output
+/latest/
+/history/
+marblescape_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*.png
+/marblescape_layers.json
+marblescape-settings-*.json
+*.log
+*.tmp
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local Windows artifacts
+*.lnk
+/marblescape.exe
+
+# Build and release output
+/build/
+/dist/
+/release/
+*.spec
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
