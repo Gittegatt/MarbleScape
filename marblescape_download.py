@@ -108,8 +108,8 @@ VIEW_MODE = "fit"
 DEFAULT_ZOOM = 1.1
 ZOOM = DEFAULT_ZOOM
 
-# Hide experimental projections in Settings until explicitly unlocked.
-UNLOCK_EXPERIMENTAL_PROJECTIONS = False
+# Hide extended projections in Settings until explicitly enabled.
+SHOW_EXTENDED_PROJECTIONS = False
 
 # When enabled, MTG TrueColor shows only the sunlit area. The remainder of
 # the Earth disk is filled with black while the area outside the disk keeps
@@ -273,16 +273,16 @@ PROJECTIONS = {
     },
 }
 
-EXPERIMENTAL_PROJECTIONS = frozenset({
+EXTENDED_PROJECTIONS = frozenset({
     "GEOS: MSG IODC", "Spherical Mercator", "North Polar", "South Polar",
 })
 
 
-def available_projection_choices(unlocked=False):
+def available_projection_choices(show_extended=False):
     """Return the projection choices visible in Settings."""
     return tuple(
         name for name in PROJECTIONS
-        if unlocked or name not in EXPERIMENTAL_PROJECTIONS
+        if show_extended or name not in EXTENDED_PROJECTIONS
     )
 
 
@@ -326,7 +326,7 @@ LOADED_CONFIGURATION_FIELDS = (
     "RENDER_SCALE_AUTOMATIC", "OUTPUT_ROOT_WINDOWS", "OUTPUT_ROOT_LINUX",
     "CUSTOM_LATEST_FOLDER", "CUSTOM_HISTORY_FOLDER", "PROJECTION",
     "VIEW_PRESET", "CUSTOM_BBOX", "VIEW_MODE", "ZOOM",
-    "UNLOCK_EXPERIMENTAL_PROJECTIONS",
+    "SHOW_EXTENDED_PROJECTIONS",
     "TRUECOLOR_BLACK_NIGHT", "ENABLE_HISTORY", "HISTORY_RETENTION_MODE",
     "HISTORY_MAX_FILES", "HISTORY_RETENTION_YEARS",
     "HISTORY_RETENTION_MONTHS", "HISTORY_RETENTION_DAYS",
@@ -684,7 +684,7 @@ def load_configuration(config_path):
     global OUTPUT_ROOT_WINDOWS, OUTPUT_ROOT_LINUX
     global CUSTOM_LATEST_FOLDER, CUSTOM_HISTORY_FOLDER
     global PROJECTION, VIEW_PRESET, CUSTOM_BBOX, VIEW_MODE, ZOOM
-    global UNLOCK_EXPERIMENTAL_PROJECTIONS
+    global SHOW_EXTENDED_PROJECTIONS
     global TRUECOLOR_BLACK_NIGHT
     global ENABLE_HISTORY, HISTORY_RETENTION_MODE, HISTORY_MAX_FILES
     global HISTORY_RETENTION_YEARS, HISTORY_RETENTION_MONTHS
@@ -755,10 +755,10 @@ def load_configuration(config_path):
 
     view = config.get("view", {})
     PROJECTION = str(view.get("projection", PROJECTION))
-    # Preserve a deliberately selected experimental CRS in older configurations.
-    UNLOCK_EXPERIMENTAL_PROJECTIONS = bool(view.get(
-        "unlock_experimental_projections",
-        PROJECTION in EXPERIMENTAL_PROJECTIONS,
+    # Preserve older configurations and backups; the new key takes precedence.
+    SHOW_EXTENDED_PROJECTIONS = bool(view.get(
+        "show_extended_projections",
+        view.get("unlock_experimental_projections", PROJECTION in EXTENDED_PROJECTIONS),
     ))
     VIEW_PRESET = str(view.get("preset", VIEW_PRESET)).lower()
     configured_bbox = view.get("bbox", CUSTOM_BBOX)
@@ -1072,11 +1072,11 @@ def validate_configuration():
     if PROJECTION not in PROJECTIONS:
         raise ValueError(f"Unsupported PROJECTION: {PROJECTION}")
     if (
-        PROJECTION in EXPERIMENTAL_PROJECTIONS
-        and not UNLOCK_EXPERIMENTAL_PROJECTIONS
+        PROJECTION in EXTENDED_PROJECTIONS
+        and not SHOW_EXTENDED_PROJECTIONS
     ):
         raise ValueError(
-            "Enable view.unlock_experimental_projections to use this projection."
+            "Enable view.show_extended_projections to use this projection."
         )
 
     if VIEW_PRESET not in VIEW_PRESETS:
@@ -3051,11 +3051,11 @@ def normalize_settings_form_values(values):
     # Existing regional presets remain geographic until projected presets
     # are implemented. Persist the effective projection shown in the UI.
     projection_name = VIEW_PRESETS[view_preset]["projection"] or projection_name
-    experimental_unlocked = bool(values.get(
-        "unlock_experimental_projections", UNLOCK_EXPERIMENTAL_PROJECTIONS
+    show_extended = bool(values.get(
+        "show_extended_projections", SHOW_EXTENDED_PROJECTIONS
     ))
-    if projection_name not in available_projection_choices(experimental_unlocked):
-        raise ValueError("Unlock experimental projections before selecting this projection.")
+    if projection_name not in available_projection_choices(show_extended):
+        raise ValueError("Enable Show extended projections before selecting this projection.")
     if fit_mode not in {"fit", "crop"}:
         raise ValueError("Fit mode must be 'fit' or 'crop'.")
     if retention_mode not in {"count", "time", "both"}:
@@ -3093,7 +3093,7 @@ def normalize_settings_form_values(values):
         ("windows", "position", position),
         ("view", "preset", view_preset),
         ("view", "projection", projection_name),
-        ("view", "unlock_experimental_projections", experimental_unlocked),
+        ("view", "show_extended_projections", show_extended),
         ("view", "fit_mode", fit_mode),
         ("view", "zoom", zoom),
         (
@@ -3866,8 +3866,8 @@ def run_with_windows_tray(argv=None):
             ),
             "view_preset": tk.StringVar(value=current_preset_label),
             "projection": tk.StringVar(value=get_active_view()[0]),
-            "unlock_experimental_projections": tk.BooleanVar(
-                value=UNLOCK_EXPERIMENTAL_PROJECTIONS
+            "show_extended_projections": tk.BooleanVar(
+                value=SHOW_EXTENDED_PROJECTIONS
             ),
             "satellite_layer": tk.StringVar(value=current_layer_label),
             "fit_mode": tk.StringVar(value=VIEW_MODE),
@@ -4309,7 +4309,7 @@ def run_with_windows_tray(argv=None):
 
         def refresh_projection_choices():
             choices = available_projection_choices(
-                variables["unlock_experimental_projections"].get()
+                variables["show_extended_projections"].get()
             )
             projection_combo.configure(values=choices)
             if variables["projection"].get() not in choices:
@@ -4388,7 +4388,7 @@ def run_with_windows_tray(argv=None):
         )
         projection_combo = add_combo(
             view_frame, 1, "Projection", variables["projection"],
-            available_projection_choices(UNLOCK_EXPERIMENTAL_PROJECTIONS), width=30,
+            available_projection_choices(SHOW_EXTENDED_PROJECTIONS), width=30,
         )
         projection_combo.bind("<<ComboboxSelected>>", select_projection)
         add_combo(view_frame, 2, "Fit mode", variables["fit_mode"], ("fit", "crop"))
@@ -4400,15 +4400,19 @@ def run_with_windows_tray(argv=None):
         ).grid(row=4, column=0, columnspan=2, pady=3, sticky="w")
         ttk.Checkbutton(
             view_frame,
-            text="Unlock experimental projections",
-            variable=variables["unlock_experimental_projections"],
+            text="Show extended projections",
+            variable=variables["show_extended_projections"],
             command=refresh_projection_choices,
         ).grid(row=5, column=0, columnspan=2, pady=3, sticky="w")
         ttk.Label(
             view_frame,
+            text="Coverage depends on the selected satellite layer.",
+        ).grid(row=6, column=0, columnspan=2, pady=3, sticky="w")
+        ttk.Label(
+            view_frame,
             text="Changing projection resets the view to Full Earth.\n"
                  "Regional presets use Geographic.",
-        ).grid(row=6, column=0, columnspan=2, pady=3, sticky="w")
+        ).grid(row=7, column=0, columnspan=2, pady=3, sticky="w")
 
         output_frame = ttk.LabelFrame(image_tab, text="Output", padding=8)
         output_frame.grid(row=1, column=0, pady=(0, 8), sticky="ew")

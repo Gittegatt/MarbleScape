@@ -23,7 +23,7 @@ linux_root = "."
 [view]
 # Available projections: Geographic, GEOS: MSG FES, MTG FD, GEOS: MSG RSS,
 # GEOS: MSG IODC, Spherical Mercator, North Polar, South Polar.
-# These last four require unlock_experimental_projections = true.
+# These last four require show_extended_projections = true.
 # Regional presets still use Geographic. Other projections apply to full_earth
 # or custom. Use fit_mode="crop" for Geographic full_earth at screen ratios.
 projection = "GEOS: MSG FES, MTG FD"
@@ -32,7 +32,7 @@ preset = "full_earth"           # full_earth, europe, mediterranean,
 fit_mode = "fit"                # fit or crop
 zoom = 1.1
 truecolor_black_night = false  # Applies only to MTG TrueColor.
-unlock_experimental_projections = false  # Show Mercator and polar choices in Settings.
+show_extended_projections = false  # Show IODC, Mercator, and polar choices in Settings.
 # For preset="custom", use logical x/y order in the selected projection:
 # bbox = [-6500000.0, -6500000.0, 6500000.0, 6500000.0]
 # With projection="Geographic": bbox = [west, south, east, north]

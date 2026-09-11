@@ -319,7 +319,7 @@ and two GEOS projections:
 - `GEOS: MSG FES, MTG FD` (geostationary, centered at 0 degrees)
 - `GEOS: MSG RSS` (geostationary, centered at 9.5 degrees east)
 
-Check **Unlock experimental projections**, directly below **Black TrueColor
+Check **Show extended projections**, directly below **Black TrueColor
 night side**, to also show:
 
 - `GEOS: MSG IODC` (geostationary, centered at 41.5 degrees east)
@@ -327,19 +327,23 @@ night side**, to also show:
 - `North Polar` (EPSG:3995)
 - `South Polar` (EPSG:3976)
 
-IODC is grouped here because combining it with MTG layers can expose areas
-outside their image coverage, where the basemap remains visible. This is an
-application compatibility precaution, not an experimental status of IODC itself.
+GEOS: MSG IODC is currently grouped under extended projections because of
+coverage limitations when combined with MTG layers. The projection itself is
+not experimental. Areas outside the layer's image coverage may display the
+basemap instead of satellite imagery. The short Settings hint reads:
+"Coverage depends on the selected satellite layer."
 
 Definitions follow the [EUMETSAT viewer configuration](https://view.eumetsat.int/assets/data/config.json).
-The checkbox is saved as `view.unlock_experimental_projections` (default
-`false`) and included in JSON backups. Unchecking it while an experimental
+The checkbox is saved as `view.show_extended_projections` (default
+`false`) and included in JSON backups. Unchecking it while an extended
 projection is selected resets the draft view to GEOS at 0 degrees / Full Earth.
 Use **Apply** or **OK** to save; **Cancel** discards these changes. Older
-configurations without the unlock setting retain an already selected experimental
-projection and open with the checkbox checked. If the setting is explicitly
-`false`, selecting any experimental projection in TOML also requires setting it
-to `true`.
+configurations and JSON backups using `view.unlock_experimental_projections`
+remain supported; the new key takes precedence when both are present. Settings
+saves use the new key. Configurations without either setting retain an already
+selected extended projection and open with the checkbox checked. If the setting
+is explicitly `false`, selecting any extended projection in TOML also requires
+setting it to `true`.
 
 Changing projection in the UI selects `full_earth`, resets zoom to `1.1`, and
 uses `fit` (`crop` for Geographic, to stay within valid latitude/longitude
