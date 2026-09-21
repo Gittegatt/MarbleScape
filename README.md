@@ -287,8 +287,8 @@ Settings is organized into eight tabs:
 - **Profiles & Rotation:** Named Image snapshots, their order, and the rotation interval.
 - **History & Storage:** History configuration and current storage status.
 - **Backup:** JSON import and export.
-- **Sources:** Visible, clickable URLs for every official imagery, catalogue,
-  authentication, processing, and map service used by MarbleScape, grouped by provider.
+- **Sources:** Clickable links to the satellite imagery viewers used by MarbleScape,
+  grouped by provider. Technical API and data endpoints are not listed there.
 - **About:** Installed version, project link, imagery notice, and a manual GitHub update check.
 
 The update check contacts GitHub only when the button is pressed and compares

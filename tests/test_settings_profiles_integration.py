@@ -279,10 +279,16 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
                 if isinstance(widget, tk.Label)
                 and str(widget.cget("text")).startswith("https://")
             }
-            self.assertIn("https://view.eumetsat.int/", source_urls)
-            self.assertIn("https://cdn.star.nesdis.noaa.gov/", source_urls)
-            self.assertIn("https://worldview.earthdata.nasa.gov/", source_urls)
-            self.assertIn("https://sh.dataspace.copernicus.eu/process/v1", source_urls)
+            self.assertEqual(source_urls, {
+                "https://view.eumetsat.int/productviewer",
+                "https://www.star.nesdis.noaa.gov/goes/index.php",
+                "https://www.star.nesdis.noaa.gov/goes/SUVI.php?sat=G19",
+                "https://himawari8.nict.go.jp/",
+                "https://ds.data.jma.go.jp/mscweb/data/himawari/index.html",
+                "https://slider.cira.colostate.edu/",
+                "https://worldview.earthdata.nasa.gov/",
+                "https://browser.dataspace.copernicus.eu/",
+            })
             section = next(
                 widget for widget in self.descendants(context.root)
                 if isinstance(widget, ttk.LabelFrame)

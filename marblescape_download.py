@@ -242,36 +242,30 @@ GITHUB_LATEST_RELEASE_API = (
 )
 GITHUB_TAGS_API = "https://api.github.com/repos/Gittegatt/MarbleScape/tags?per_page=1"
 MAX_GITHUB_RESPONSE_BYTES = 1_000_000
-SOURCE_REFERENCE_URLS = (
+SOURCE_VIEWER_URLS = (
     ("EUMETSAT / EUMETView", (
-        "https://view.eumetsat.int/",
-        "https://view.eumetsat.int/geoserver/wms",
-        "https://view.eumetsat.int/assets/data/productDecorations.json",
-        "https://api.eumetsat.int/product-navigator/csw/_search",
+        "https://view.eumetsat.int/productviewer",
     )),
-    ("NOAA STAR — GOES and Solar", (
-        "https://www.star.nesdis.noaa.gov/goes/",
-        "https://cdn.star.nesdis.noaa.gov/",
+    ("NOAA STAR — GOES-East and GOES-West", (
+        "https://www.star.nesdis.noaa.gov/goes/index.php",
     )),
-    ("Himawari — NICT and JMA", (
+    ("NOAA STAR — Solar (SUVI)", (
+        "https://www.star.nesdis.noaa.gov/goes/SUVI.php?sat=G19",
+    )),
+    ("Himawari — NICT", (
         "https://himawari8.nict.go.jp/",
-        "https://jh190005-4.kudpc.kyoto-u.ac.jp/himawari/",
-        "https://ds.data.jma.go.jp/mscweb/data/himawari/",
+    )),
+    ("Himawari — JMA", (
+        "https://ds.data.jma.go.jp/mscweb/data/himawari/index.html",
     )),
     ("CIRA SLIDER", (
         "https://slider.cira.colostate.edu/",
     )),
-    ("NASA Worldview / GIBS", (
+    ("NASA Worldview", (
         "https://worldview.earthdata.nasa.gov/",
-        "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best/1.0.0/WMTSCapabilities.xml",
-        "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi",
     )),
-    ("Copernicus Data Space / Sentinel Hub", (
-        "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings",
-        "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
-        "https://sh.dataspace.copernicus.eu/catalog/v1/search",
-        "https://sh.dataspace.copernicus.eu/process/v1",
-        "https://gisco-services.ec.europa.eu/",
+    ("Copernicus Browser", (
+        "https://browser.dataspace.copernicus.eu/",
     )),
 )
 
@@ -7598,18 +7592,18 @@ def run_with_windows_tray(argv=None):
         ).grid(row=0, column=2)
 
         sources_frame = ttk.LabelFrame(
-            sources_tab, text="Official imagery and metadata sources", padding=10
+            sources_tab, text="Satellite imagery viewers", padding=10
         )
         sources_frame.grid(row=0, column=0, sticky="ew")
         sources_frame.columnconfigure(0, weight=1)
         ttk.Label(
             sources_frame,
-            text=("MarbleScape connects directly to these provider websites and "
-                  "service endpoints. Select a URL to open it in the default browser."),
+            text=("Open a viewer to browse the imagery used by MarbleScape. "
+                  "Select a URL to open it in your default browser."),
             wraplength=650, justify="left",
         ).grid(row=0, column=0, pady=(0, 8), sticky="w")
         allowed_source_urls = {
-            url for _provider, urls in SOURCE_REFERENCE_URLS for url in urls
+            url for _provider, urls in SOURCE_VIEWER_URLS for url in urls
         }
 
         def open_source_reference(url):
@@ -7624,7 +7618,7 @@ def run_with_windows_tray(argv=None):
                 )
 
         source_row = 1
-        for provider_name, urls in SOURCE_REFERENCE_URLS:
+        for provider_name, urls in SOURCE_VIEWER_URLS:
             ttk.Label(
                 sources_frame, text=provider_name,
                 font=("TkDefaultFont", 10, "bold"),
