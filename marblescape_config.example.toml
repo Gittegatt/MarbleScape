@@ -1,6 +1,84 @@
 # MarbleScape wallpaper configuration
-# Layer order is bottom to top. Restart the application after manual changes.
+# EUMETSAT layer order is bottom to top. Restart after manual changes.
 
+[source]
+provider = "eumetsat"          # eumetsat, goes_east, goes_west, solar, himawari, slider, copernicus, or worldview
+check_for_updates = true        # false downloads once, then reuses the matching local image.
+
+# Each source keeps its own selection when switching providers.
+# NOAA selections always use the latest published still image.
+# Auto chooses the smallest offered source that avoids upscaling the output.
+[sources.eumetsat]
+theme = "weather_monitoring"
+satellite = "MTG - 0 Degree"
+mission = "MTG"
+product_type = "RGB Composites"
+layer = "mtg_fd:rgb_geocolour"
+orbit_type = "GEO"             # Catalogue metadata retained with the selected layer.
+fill_gaps = false               # Available only for suitable LEO single-overpass layers.
+gap_fill_lookback_hours = 12    # 12 or 24; only transparent No Data pixels are filled.
+
+[sources.goes_east]
+area = "full_disk"
+product = "GEOCOLOR"
+resolution = "auto"           # auto, largest, or a size offered in Settings.
+
+[sources.goes_west]
+area = "full_disk"
+product = "GEOCOLOR"
+resolution = "auto"
+
+[sources.solar]
+area = "sun"
+product = "Fe171"
+resolution = "auto"
+
+[sources.himawari]
+area = "nict_full_disk"
+product = "true_color"
+resolution = "auto"
+
+# CIRA SLIDER satellite/sector and product tiles are always the newest still image.
+# Map borders and latitude/longitude lines are separate SLIDER overlays and are not downloaded.
+[sources.slider]
+area = "goes-19---full_disk"
+product = "geocolor"
+resolution = "auto"
+
+# NASA Worldview is accessed through the public GIBS WMTS catalogue and WMS image service.
+# area is the GIBS visualization layer; product is "latest" or a listed fixed date.
+[sources.worldview]
+area = "VIIRS_NOAA20_CorrectedReflectance_TrueColor"
+product = "latest"
+resolution = "auto"
+
+# Copernicus Browser configuration. Date "latest" resolves the newest
+# acquisition available at the selected latitude/longitude.
+[sources.copernicus]
+configuration = "DEFAULT-THEME"
+mission = "Sentinel-2"
+product = "DEFAULT-THEME::a91f72"
+layer = "1_TRUE_COLOR"
+highlight = ""
+date = "latest"
+latitude = 51.1657
+longitude = 10.4515
+map_zoom = 7
+map_labels = true
+coverage_mode = "fill_gaps"
+# Supported maximum lookback values: 3, 7, 14, 30, 45, 60, or 90 days.
+lookback_days = 14
+
+# Create a free OAuth client under User Settings > OAuth clients at:
+# https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
+# The Process API used by MarbleScape does not require a Configuration Instance.
+# Settings writes client_secret_protected as a per-user Windows DPAPI value.
+[copernicus]
+client_id = ""
+client_secret_protected = ""
+
+# Endpoint, WMS version, archive time, and render mode apply to EUMETSAT.
+# Update interval, timeout, and continuous operation apply to all sources.
 [service]
 endpoint = "https://view.eumetsat.int/geoserver/wms"
 version = "1.3.0"
@@ -10,20 +88,30 @@ timeout_seconds = 90
 run_continuously = true
 render_mode = "auto"            # auto, server, or local
 
+[download]
+show_speed = true
+speed_unit = "automatic"        # automatic, KB/s, MB/s, or Mbit/s
+show_progress = true             # Percentage and transferred/total size when known.
+show_progress_bar = true         # Indeterminate when the server gives no total size.
+keep_completed_visible = false   # Keep the successful result visible until the next download.
+
 [output]
-latest_folder = ""             # Empty = root/latest; relative to the script folder.
+latest_folder = ""             # Empty = root/content/latest; relative to the script folder.
 width = 2560
 height = 0                      # 0 derives height from aspect_ratio.
 aspect_ratio = "16:9"
-render_scale = "auto"           # Auto (max useful); or 1.0, 1.25, 1.5, 2.0.
+render_scale = "auto"           # EUMETSAT WMS only: auto, or 1.0, 1.25, 1.5, 2.0.
 background_color = "#000000"
 windows_root = "."              # Relative to the application folder; absolute is allowed.
 linux_root = "."
 
 [view]
+# Fit mode and zoom apply to EUMETSAT, NOAA, Himawari, CIRA SLIDER, and NASA Worldview. Copernicus uses its
+# own latitude, longitude, and map_zoom. Projections, presets, and the
+# TrueColor night option apply only to EUMETSAT.
 # Available projections: Geographic, GEOS: MSG FES, MTG FD, GEOS: MSG RSS,
 # GEOS: MSG IODC, Spherical Mercator, North Polar, South Polar.
-# These last four require show_extended_projections = true.
+# All seven official EUMETView projections are shown in Settings.
 # Regional presets still use Geographic. Other projections apply to full_earth
 # or custom. Use fit_mode="crop" for Geographic full_earth at screen ratios.
 projection = "GEOS: MSG FES, MTG FD"
@@ -32,13 +120,13 @@ preset = "full_earth"           # full_earth, europe, mediterranean,
 fit_mode = "fit"                # fit or crop
 zoom = 1.1
 truecolor_black_night = false  # Applies only to MTG TrueColor.
-show_extended_projections = false  # Show IODC, Mercator, and polar choices in Settings.
+show_extended_projections = false  # Retained for compatibility; no longer hides choices.
 # For preset="custom", use logical x/y order in the selected projection:
 # bbox = [-6500000.0, -6500000.0, 6500000.0, 6500000.0]
 # With projection="Geographic": bbox = [west, south, east, north]
 
 [history]
-folder = ""                    # Empty = root/history; relative to the script folder.
+folder = ""                    # Empty = root/content/history; relative to the script folder.
 enabled = false
 retention_mode = "count"        # count, time, or both
 max_files = 100
@@ -53,6 +141,10 @@ set_wallpaper = true
 position = "fit"                # center, tile, stretch, fit, fill, or span
 pause_on_error = true
 
+[display]
+time_zone = "system"            # system (recommended) or utc; display only
+
+# These WMS layers apply only to EUMETSAT and are retained for later use.
 # Friendly basemap choices. Normally enable exactly one.
 [[layers]]
 kind = "basemap"

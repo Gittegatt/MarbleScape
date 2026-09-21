@@ -1,5 +1,6 @@
 # Local configuration
 /marblescape_config.toml
+/profiles.toml
 # Legacy configuration files still supported by automatic migration
 /earthscape_config.toml
 /satscape_config.toml
@@ -8,11 +9,13 @@
 # Runtime output
 /latest/
 /history/
+/content/
 marblescape_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*.png
 /marblescape_layers.json
 marblescape-settings-*.json
 *.log
 *.tmp
+/.tmp_eumetsat_*
 
 # Python environments and caches
 __pycache__/

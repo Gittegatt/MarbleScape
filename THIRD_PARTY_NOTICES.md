@@ -8,6 +8,7 @@ are included in the `licenses` directory.
 
 | Component | Tested version | Licence | Project |
 | --- | ---: | --- | --- |
+| certifi | 2026.7.22 | MPL-2.0 | https://github.com/certifi/python-certifi |
 | Pillow | 12.3.0 | MIT-CMU | https://python-pillow.github.io/ |
 | pystray | 0.19.5 | LGPL-3.0-or-later | https://github.com/moses-palmer/pystray |
 | six | 1.17.0 | MIT | https://github.com/benjaminp/six |
@@ -18,7 +19,7 @@ The tested Windows executable is built with:
 
 | Component | Tested version | Licence or terms | Project |
 | --- | ---: | --- | --- |
-| Python | 3.14.0 | Python Software Foundation Licence | https://www.python.org/psf/license/ |
+| Python | 3.14.7 | Python Software Foundation Licence | https://www.python.org/psf/license/ |
 | PyInstaller | 6.22.2 | GPL with bootloader exception; certain files Apache-2.0 (see bundled COPYING) | https://pyinstaller.org/ |
 | pyinstaller-hooks-contrib | 2026.7 | Apache-2.0 and GPL-2.0-or-later | https://github.com/pyinstaller/pyinstaller-hooks-contrib |
 | altgraph | 0.17.5 | MIT | https://github.com/ronaldoussoren/altgraph |
@@ -32,6 +33,65 @@ reviewing the exact contents of builds made in a different environment.
 
 Example satellite images appear under `assets/examples`. Live downloads and
 WMS layers remain subject to the applicable provider terms and data policies.
+
+## Himawari imagery
+
+Live Himawari imagery is requested from the public NICT Himawari viewer and the
+JMA Meteorological Satellite Center real-time image service. The image data is
+not bundled with MarbleScape and remains subject to each provider's terms:
+
+- NICT Himawari viewer: https://himawari8.nict.go.jp/
+- JMA Himawari real-time images: https://ds.data.jma.go.jp/mscweb/data/himawari/
+- JMA Meteorological Satellite Center terms: https://www.data.jma.go.jp/mscweb/en/general/note.html
+
+JMA specifies additional acknowledgement for True Color Reproduction imagery.
+Where the complete acknowledgement shown on the JMA Himawari page cannot be
+included, its stated minimum is: JMA, NOAA/NESDIS, CSU/CIRA. Users who publish
+or redistribute downloaded imagery remain responsible for applying the current
+provider terms and attribution requirements.
+
+## Copernicus catalogue metadata and map tiles
+
+The bundled Copernicus configuration, product, layer, evalscript, and highlight
+catalogue is derived from the official `eu-cdse/copernicus-browser` source at
+revision `1a1724c42b04e8a0953a410016676daea8ee5d33`. That project is copyright
+2023 eu-cdse and licensed under MIT; its licence is included as
+`licenses/COPERNICUS-BROWSER-MIT.txt`.
+
+When Copernicus map background or labels are enabled, MarbleScape downloads
+GISCO tiles based on OpenStreetMap data. Generated images carry the required
+attribution: © OpenStreetMap contributors; tiles © European Union, GISCO.
+OpenStreetMap data is available under the Open Database License (ODbL):
+https://www.openstreetmap.org/copyright
+
+## CIRA SLIDER imagery
+
+Live SLIDER catalogue metadata and PNG imagery are requested from the public
+Cooperative Institute for Research in the Atmosphere (CIRA) service at Colorado
+State University. They are not bundled with MarbleScape and remain subject to
+the provider's current notices and source-specific data terms:
+
+- CIRA SLIDER: https://slider.cira.colostate.edu/
+- SLIDER experimental products disclaimer: https://rammb2.cira.colostate.edu/resources/experimental_products_disclaimer/
+
+Users who publish or redistribute downloaded imagery remain responsible for
+the applicable satellite/product attribution and provider terms.
+
+## NASA Worldview and GIBS imagery
+
+Live NASA Worldview catalogue metadata and imagery are requested from NASA's
+Global Imagery Browse Services (GIBS). No NASA imagery or GIBS software is
+bundled with MarbleScape. Each visualization can combine data from different
+missions or providers and remains subject to its applicable data policy,
+attribution, and acknowledgement requirements:
+
+- NASA Worldview: https://worldview.earthdata.nasa.gov/
+- NASA GIBS API documentation: https://nasa-gibs.github.io/gibs-api-docs/
+- NASA Earthdata data-use guidance: https://www.earthdata.nasa.gov/engage/open-data-services-software/data-use-policy
+
+Users who publish or redistribute downloaded imagery must identify the selected
+GIBS layer and follow the current terms for its underlying dataset. NASA and
+Earthdata references do not imply endorsement of MarbleScape.
 
 ## pystray source and distribution
 

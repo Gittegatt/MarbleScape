@@ -18,8 +18,11 @@ $windowsPackageDirectory = [System.IO.Path]::GetFullPath(
 $sourceArchive = Join-Path $releaseRoot "MarbleScape-source.zip"
 $windowsArchive = Join-Path $releaseRoot "MarbleScape-windows-x64.zip"
 $checksumsPath = Join-Path $releaseRoot "SHA256SUMS.txt"
+$rootExecutable = Join-Path $projectRoot "marblescape.exe"
 $thirdPartyLicenceNames = @(
     "ALTGRAPH-0.17.5.txt",
+    "CERTIFI-2026.7.22.txt",
+    "COPERNICUS-BROWSER-MIT.txt",
     "PEFILE-2024.8.26.txt",
     "PILLOW-12.3.0.txt",
     "PYINSTALLER-6.22.2.txt",
@@ -68,6 +71,7 @@ function Assert-NotReparsePoint {
 }
 
 Assert-ChildPath -Parent $projectRoot -Candidate $releaseRoot
+Assert-ChildPath -Parent $projectRoot -Candidate $rootExecutable
 Assert-ChildPath -Parent $releaseRoot -Candidate $sourcePackageDirectory
 Assert-ChildPath -Parent $releaseRoot -Candidate $windowsPackageDirectory
 
@@ -146,7 +150,7 @@ New-Item -ItemType Directory -Path (
 
 try {
     & $PythonCommand -c (
-        "import PIL, PyInstaller, pystray; " +
+        "import certifi, PIL, PyInstaller, pystray; " +
         "print('Build dependencies are available.')"
     )
     if ($LASTEXITCODE -ne 0) {
@@ -228,6 +232,14 @@ try {
             ($iconPath + ";assets/icons")
         )
     }
+    $pyinstallerArguments += @(
+        "--add-data",
+        ($applicationIcon + ";assets/icons")
+    )
+    $pyinstallerArguments += @(
+        "--add-data",
+        ((Join-Path $projectRoot "marblescape_copernicus_catalog.json") + ";.")
+    )
     $pyinstallerArguments += (
         Join-Path $projectRoot "marblescape_download.py"
     )
@@ -259,6 +271,21 @@ try {
         )
     }
 
+    # Publish the same smoke-tested binary in the project root on every build.
+    $rootExecutableTemp = Join-Path $projectRoot (
+        ".marblescape-" + [guid]::NewGuid().ToString("N") + ".tmp"
+    )
+    Assert-ChildPath -Parent $projectRoot -Candidate $rootExecutableTemp
+    try {
+        Copy-Item -LiteralPath $builtExecutable -Destination $rootExecutableTemp
+        Move-Item -LiteralPath $rootExecutableTemp -Destination $rootExecutable -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $rootExecutableTemp) {
+            Remove-Item -LiteralPath $rootExecutableTemp -Force
+        }
+    }
+
     foreach ($file in @(
         ".gitignore",
         "README.md",
@@ -270,6 +297,21 @@ try {
         "verify_pystray_source.py",
         "marblescape_config.example.toml",
         "marblescape_download.py",
+        "marblescape_download_progress.py",
+        "marblescape_noaa.py",
+        "marblescape_himawari.py",
+        "marblescape_slider.py",
+        "marblescape_worldview.py",
+        "marblescape_eumetsat.py",
+        "marblescape_catalogues.py",
+        "marblescape_copernicus.py",
+        "marblescape_copernicus_settings.py",
+        "marblescape_copernicus_catalog.json",
+        "marblescape_source_settings.py",
+        "marblescape_cache.py",
+        "marblescape_profiles.py",
+        "marblescape_profile_settings.py",
+        "marblescape_time.py",
         "requirements.txt",
         "requirements-build.txt",
         "start.bat"

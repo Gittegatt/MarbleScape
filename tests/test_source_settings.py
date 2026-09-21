@@ -1,0 +1,605 @@
+"""Hidden-Tk regression tests with no live NOAA requests.
+
+Run with ``python -m unittest discover -s tests``. Tk tests skip on systems
+without Tk or a display server.
+"""
+
+from copy import deepcopy
+import gc
+import threading
+import time
+import unittest
+from unittest import mock
+
+try:
+    import tkinter as tk
+except ImportError:
+    tk = None
+
+if tk is not None:
+    import marblescape_source_settings as source_settings
+
+
+class FakeNOAAClient:
+    def __init__(self, **kwargs):
+        self.calls = []
+        self.fail = False
+        self.all_refresh_gate = None
+        self.all_refresh_started = threading.Event()
+        self.all_summary = None
+        self.catalogue_refresh_status = {"running": False, "done": 0, "total": 0, "message": "", "error": ""}
+        self.areas = {
+            "goes_east": [
+                {"id": "full_disk", "label": "Full Disk", "category": "Global"},
+                {"id": "test_a", "label": "Austin", "category": "Local"},
+                {"id": "test_b", "label": "Boston", "category": "Local"},
+                {"id": "storm_one", "label": "Storm One", "category": "Active storms"},
+                {"id": "storm_two", "label": "Storm Two", "category": "Active storms"},
+            ],
+            "goes_west": [
+                {"id": "full_disk", "label": "Full Disk", "category": "Global"},
+            ],
+            "solar": [{"id": "sun", "label": "Sun", "category": "Solar"}],
+            "himawari": [
+                {"id": "nict_full_disk", "label": "NICT - Full Disk (True Color)",
+                 "category": "NICT True Color"},
+                {"id": "jma_jpn", "label": "JMA - Japan", "category": "JMA Regions"},
+            ],
+            "slider": [
+                {"id": "goes-19---full_disk", "label": "Full Disk",
+                 "category": "GOES-19 (East; 75.2W)"},
+                {"id": "gk2a---full_disk", "label": "Full Disk",
+                 "category": "GEO-KOMPSAT-2A (128E)"},
+            ],
+            "worldview": [
+                {"id": "VIIRS_NOAA20_CorrectedReflectance_TrueColor",
+                 "label": "Corrected Reflectance (True Color, VIIRS, NOAA-20)",
+                 "category": "Corrected Reflectance"},
+            ],
+        }
+
+    def list_areas(self, provider, refresh=False):
+        self.calls.append(("areas", provider, refresh))
+        if self.fail:
+            raise OSError("offline fixture")
+        return deepcopy(self.areas[provider])
+
+    def list_products(self, provider, area_id, refresh=False):
+        self.calls.append(("products", provider, area_id, refresh))
+        if self.fail:
+            raise OSError("offline fixture")
+        if provider == "solar":
+            return [{"id": "Fe171", "label": "171 Angstrom", "resolutions": ["300x300", "1200x1200"]}]
+        if provider == "himawari":
+            return [{"id": "true_color", "label": "True Color",
+                     "resolutions": ["550x550", "11000x11000"]}]
+        if provider == "slider":
+            return [{"id": "geocolor", "label": "GeoColor",
+                     "resolutions": ["678x678", "5424x5424", "10848x10848"]}]
+        if provider == "worldview":
+            return [
+                {"id": "latest", "label": "Latest available (currently 2026-09-14)",
+                 "resolutions": ["1024x512", "4096x2048", "8192x4096"]},
+                {"id": "2026-09-13", "label": "Fixed · 2026-09-13",
+                 "resolutions": ["1024x512", "4096x2048", "8192x4096"]},
+            ]
+        return [
+            {"id": "GEOCOLOR", "label": "GeoColor", "resolutions": ["678x678", "1808x1808"]},
+            {"id": "13", "label": "Infrared", "resolutions": ["678x678", "5424x5424"]},
+        ]
+
+    def refresh_all_catalogues(self, refresh=True, progress=None):
+        self.calls.append(("all", refresh))
+        self.catalogue_refresh_status = {"running": True, "done": 1, "total": 4,
+                                          "message": "Fixture areas", "error": ""}
+        if progress:
+            progress(1, 4, "Fixture areas")
+        self.all_refresh_started.set()
+        if self.all_refresh_gate is not None:
+            if not self.all_refresh_gate.wait(5):
+                raise RuntimeError("Fixture release timed out")
+        if self.fail:
+            self.catalogue_refresh_status = {"running": False, "done": 1, "total": 4,
+                                              "message": "Refresh failed", "error": "offline fixture"}
+            raise OSError("offline fixture")
+        summary = self.all_summary or {"providers": 3, "areas": 7, "products": 13,
+                                       "resolution_options": 26, "errors": [], "warning": "", "complete": True}
+        self.catalogue_refresh_status = {"running": False, "done": 4, "total": 4,
+                                          "message": "All NOAA catalogues are ready.", "error": summary["warning"]}
+        if progress:
+            progress(4, 4, "All NOAA catalogues are ready.")
+        return deepcopy(summary)
+
+
+@unittest.skipIf(tk is None, "Tkinter is not installed")
+class SourceSettingsTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk display unavailable: {exc}")
+        self.root.withdraw()
+        self.callback_errors = []
+        self.root.report_callback_exception = lambda *args: self.callback_errors.append(args)
+        self.patch_client = mock.patch.object(source_settings, "NOAAClient", FakeNOAAClient)
+        self.patch_client.start()
+        self.controllers = []
+        self.threads_before = set(threading.enumerate())
+
+    def tearDown(self):
+        for controller in self.controllers:
+            controller.close()
+            gate = getattr(controller._client, "all_refresh_gate", None)
+            if gate is not None:
+                gate.set()
+        try:
+            self._join_workers()
+        finally:
+            self.root.destroy()
+            self.controllers.clear()
+            controller = None
+            gc.collect()
+            self.patch_client.stop()
+        self.assertEqual(self.callback_errors, [], "An exception escaped a Tk callback")
+
+    def _join_workers(self):
+        for thread in set(threading.enumerate()) - self.threads_before:
+            if thread.name.startswith("MarbleScape-catalogue"):
+                thread.join(timeout=2)
+                self.assertFalse(thread.is_alive(), "A fixture catalogue worker did not finish")
+
+    def make_settings(self, provider="eumetsat", profiles=None, **kwargs):
+        if profiles is None:
+            profiles = deepcopy(source_settings.DEFAULT_PROFILES)
+        kwargs.setdefault("client", FakeNOAAClient())
+        controller = source_settings.SourceSettings(self.root, provider, profiles, **kwargs)
+        self.controllers.append(controller)
+        return controller
+
+    def wait_for_catalogue(self, controller):
+        deadline = time.monotonic() + 5
+        while controller._loading:
+            if time.monotonic() > deadline:
+                self.fail("Timed out waiting for the fixture catalogue")
+            self.root.update()
+            time.sleep(0.01)
+        self.root.update()
+
+    @staticmethod
+    def select_provider(controller, provider):
+        controller._provider_var.set(source_settings.PROVIDER_LABELS[provider])
+        controller._select_provider()
+
+    def test_eumetsat_needs_no_catalogue_and_init_does_not_call_on_change(self):
+        changes = []
+        settings = self.make_settings(on_change=changes.append)
+        self.assertEqual(changes, [])
+        self.assertEqual(settings._client.calls, [])
+        self.assertEqual(settings.get_selection()[0], "eumetsat")
+        self.select_provider(settings, "goes_east")
+        self.wait_for_catalogue(settings)
+        self.assertEqual(changes, ["goes_east"])
+
+    def test_default_new_source_waits_for_catalogue_validation(self):
+        settings = self.make_settings("goes_east", profiles={})
+        with self.assertRaises(ValueError):
+            settings.get_selection()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["resolution"], "auto")
+
+    def test_area_filter_does_not_change_the_selected_area(self):
+        settings = self.make_settings("goes_east")
+        self.wait_for_catalogue(settings)
+        settings._category_var.set("Local")
+        settings._select_category()
+        with self.assertRaises(ValueError):
+            settings.get_selection()
+        self.wait_for_catalogue(settings)
+        settings._filter_var.set("bOsToN")
+        self.assertEqual(list(settings._area_by_label), ["Boston [test_b]"])
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["area"], "test_a")
+        settings._area_var.set("Boston [test_b]")
+        settings._select_area()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["area"], "test_b")
+
+    def test_product_sizes_and_profiles_are_retained_without_mutating_input(self):
+        profiles = deepcopy(source_settings.DEFAULT_PROFILES)
+        original = deepcopy(profiles)
+        settings = self.make_settings("goes_east", profiles=profiles)
+        self.wait_for_catalogue(settings)
+        settings._product_var.set("Infrared [13]")
+        settings._select_product()
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["resolution"], "auto")
+        settings._resolution_var.set("5424x5424")
+        settings._select_resolution()
+        self.select_provider(settings, "solar")
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._product_label["text"], "Channel")
+        self.assertFalse(settings._area_combo.winfo_manager())
+        self.assertEqual(settings.get_selection()[1]["solar"]["resolution"], "auto")
+        self.select_provider(settings, "goes_east")
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["goes_east"],
+                         {"area": "full_disk", "product": "13", "resolution": "5424x5424"})
+        self.assertEqual(profiles, original)
+        result = settings.get_selection()[1]
+        result["goes_east"]["product"] = "mutated"
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["product"], "13")
+
+    def test_himawari_uses_shared_area_product_and_resolution_controls(self):
+        settings = self.make_settings("himawari")
+        self.wait_for_catalogue(settings)
+        provider, profiles = settings.get_selection()
+        self.assertEqual(provider, "himawari")
+        self.assertEqual(profiles["himawari"], {
+            "area": "nict_full_disk", "product": "true_color", "resolution": "auto"
+        })
+        self.assertTrue(settings._area_combo.winfo_manager())
+        self.assertIn("Largest available (11000x11000)", settings._resolution_combo["values"])
+        self.assertEqual(settings._product_label["text"], "Product / layer")
+
+    def test_slider_uses_satellite_sector_product_and_clean_tiles_note(self):
+        settings = self.make_settings("slider")
+        self.wait_for_catalogue(settings)
+        provider, profiles = settings.get_selection()
+        self.assertEqual(provider, "slider")
+        self.assertEqual(profiles["slider"], {
+            "area": "goes-19---full_disk", "product": "geocolor",
+            "resolution": "auto",
+        })
+        self.assertEqual(settings._category_label["text"], "Satellite")
+        self.assertEqual(settings._area_label["text"], "Sector")
+        self.assertTrue(settings._slider_note.winfo_manager())
+        self.assertIn("without map borders", settings._slider_note["text"])
+
+    def test_worldview_uses_layer_date_and_render_resolution_controls(self):
+        settings = self.make_settings("worldview")
+        self.wait_for_catalogue(settings)
+        provider, profiles = settings.get_selection()
+        self.assertEqual(provider, "worldview")
+        self.assertEqual(profiles["worldview"], {
+            "area": "VIIRS_NOAA20_CorrectedReflectance_TrueColor",
+            "product": "latest", "resolution": "auto",
+        })
+        self.assertEqual(settings._category_label["text"], "Layer category")
+        self.assertEqual(settings._filter_label["text"], "Filter layers")
+        self.assertEqual(settings._area_label["text"], "Imagery layer")
+        self.assertEqual(settings._product_label["text"], "Date / time")
+        self.assertEqual(settings._resolution_label["text"], "Render resolution")
+        self.assertIn("Largest available (8192x4096)", settings._resolution_combo["values"])
+        self.assertIn("latest available acquisition", settings._status_var.get())
+
+    def test_offline_refresh_preserves_a_saved_complete_selection(self):
+        settings = self.make_settings("goes_east")
+        self.wait_for_catalogue(settings)
+        before = settings.get_selection()
+        settings._client.fail = True
+        settings._refresh()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection(), before)
+        self.assertIn("Saved selection can still be used", settings._status_var.get())
+        self.assertEqual(str(settings._refresh_button["state"]), "normal")
+        self.assertIn(("areas", "goes_east", True), settings._client.calls)
+
+    def test_failed_changed_selection_cannot_save_or_corrupt_inactive_profile(self):
+        settings = self.make_settings("goes_east")
+        self.wait_for_catalogue(settings)
+        before = settings.get_selection()[1]["goes_east"]
+        settings._client.fail = True
+        settings._category_var.set("Local")
+        settings._select_category()
+        self.wait_for_catalogue(settings)
+        with self.assertRaises(ValueError):
+            settings.get_selection()
+        self.select_provider(settings, "eumetsat")
+        self.assertEqual(settings.get_selection()[1]["goes_east"], before)
+
+    def test_missing_saved_area_requires_explicit_replacement(self):
+        profiles = deepcopy(source_settings.DEFAULT_PROFILES)
+        profiles["goes_east"]["area"] = "retired_storm"
+        settings = self.make_settings("goes_east", profiles=profiles)
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._area_var.get(), "retired_storm")
+        self.assertEqual(settings.get_selection()[1]["goes_east"], profiles["goes_east"])
+        self.assertIn("no longer listed", settings._status_var.get())
+        self.assertIn("new images may be unavailable", settings._status_var.get())
+        self.assertEqual(str(settings._area_combo["state"]), "readonly")
+        self.assertTrue(settings._area_combo["values"])
+        self.assertEqual(settings._client.calls, [("areas", "goes_east", False)])
+        settings._category_var.set("Local")
+        settings._select_category()
+        with self.assertRaises(ValueError):
+            settings.get_selection()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["area"], "test_a")
+
+    def test_superseded_queued_requests_do_not_call_noaa(self):
+        settings = self.make_settings()
+        settings._client_lock.acquire()
+        try:
+            for provider in ("goes_east", "goes_west", "solar"):
+                self.select_provider(settings, provider)
+        finally:
+            settings._client_lock.release()
+        self.wait_for_catalogue(settings)
+        self._join_workers()
+        self.assertEqual(settings._client.calls,
+                         [("areas", "solar", False), ("products", "solar", "sun", False)])
+        self.assertEqual(settings.provider, "solar")
+        self.assertEqual([area["id"] for area in settings._areas], ["sun"])
+
+    def test_old_completed_results_cannot_replace_new_provider(self):
+        settings = self.make_settings()
+        old_generation = settings._generation
+        self.select_provider(settings, "solar")
+        settings._results.put((old_generation, "goes_east", "areas",
+                               [{"id": "wrong", "label": "Wrong", "category": "Wrong"}],
+                               None, False))
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.provider, "solar")
+        self.assertEqual([area["id"] for area in settings._areas], ["sun"])
+
+    def test_partial_catalogue_warning_is_visible_and_selection_stays_usable(self):
+        settings = self.make_settings()
+        settings._client.catalogue_warning = "Some local NOAA areas could not be loaded."
+        self.select_provider(settings, "goes_east")
+        self.wait_for_catalogue(settings)
+        self.assertIn(settings._client.catalogue_warning, settings._status_var.get())
+        self.assertEqual(settings.get_selection()[0], "goes_east")
+
+    def test_close_cancels_queued_requests_and_poll_timer(self):
+        settings = self.make_settings()
+        settings._client_lock.acquire()
+        try:
+            self.select_provider(settings, "goes_east")
+            settings.close()
+        finally:
+            settings._client_lock.release()
+        self._join_workers()
+        self.assertEqual(settings._client.calls, [])
+        self.assertIsNone(settings._after_id)
+        settings.close()
+
+    def test_largest_option_tracks_product_size_and_keeps_concrete_saved_size(self):
+        profiles = deepcopy(source_settings.DEFAULT_PROFILES)
+        profiles["goes_east"]["resolution"] = "678x678"
+        settings = self.make_settings("goes_east", profiles)
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._resolution_var.get(), "678x678")
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["resolution"], "678x678")
+        self.assertIn("Largest available (1808x1808)", settings._resolution_combo["values"])
+        settings._product_var.set("Infrared [13]")
+        settings._select_product()
+        self.assertEqual(settings._resolution_var.get(), "Automatic (recommended)")
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["resolution"], "auto")
+        settings._resolution_var.set("678x678")
+        settings._select_resolution()
+        settings._resolution_var.set("Largest available (5424x5424)")
+        settings._select_resolution()
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["resolution"], "largest")
+        settings._category_var.set("Local")
+        settings._select_category()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._resolution_var.get(), "Automatic (recommended)")
+
+    def test_shared_client_and_eumetsat_preset_container(self):
+        client = FakeNOAAClient()
+        settings = self.make_settings(client=client)
+        self.assertIs(settings._client, client)
+        self.assertEqual(settings.eumetsat_frame.grid_info()["row"], 1)
+        self.assertTrue(settings.eumetsat_frame.winfo_manager())
+        self.select_provider(settings, "goes_east")
+        self.wait_for_catalogue(settings)
+        self.assertFalse(settings.eumetsat_frame.winfo_manager())
+        self.assertEqual(settings._filter_label["text"], "Filter areas")
+        self.assertIn("selected category", settings._filter_hint["text"])
+        self.select_provider(settings, "eumetsat")
+        self.assertTrue(settings.eumetsat_frame.winfo_manager())
+
+    def test_copernicus_dropdowns_location_flags_and_credentials_are_saved(self):
+        settings = self.make_settings(
+            "copernicus", copernicus_auth={"client_id": "client", "client_secret": "secret"}
+        )
+        cop = settings.copernicus_settings
+        self.assertTrue(cop.frame.winfo_manager())
+        self.assertFalse(settings.eumetsat_frame.winfo_manager())
+        self.assertFalse(settings._area_combo.winfo_manager())
+        self.assertEqual(len(cop._configuration_combo["values"]), 13)
+        self.assertEqual(cop._mission_var.get(), "Sentinel-2")
+        self.assertEqual(cop.get_profile()["product"], "DEFAULT-THEME::a91f72")
+        self.assertEqual(cop._zoom_combo["values"], tuple(str(value) for value in range(7, 19)))
+        self.assertEqual(cop.get_profile()["date"], "latest")
+        self.assertEqual(cop.get_profile()["coverage_mode"], "fill_gaps")
+        self.assertEqual(cop.get_profile()["lookback_days"], 14)
+        self.assertEqual(
+            cop._lookback_combo["values"],
+            ("3 days", "7 days", "14 days", "30 days", "45 days", "60 days", "90 days"),
+        )
+        self.assertEqual(str(cop._lookback_combo["state"]), "readonly")
+        l1c_label = next(label for label, product in cop._product_by_label.items()
+                         if product["name"] == "Sentinel-2 L1C")
+        cop._zoom_var.set("7")
+        cop._product_var.set(l1c_label)
+        cop._select_product()
+        self.assertEqual(cop._zoom_combo["values"], tuple(str(value) for value in range(10, 19)))
+        self.assertEqual(cop._zoom_var.get(), "10")
+        with mock.patch(
+            "marblescape_copernicus_settings.webbrowser.open_new_tab", return_value=True
+        ) as open_portal:
+            cop._oauth_button.invoke()
+        open_portal.assert_called_once_with(
+            "https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings"
+        )
+        self.assertIn("Opened the free Copernicus OAuth", cop._status_var.get())
+
+        cop._mission_var.set("Sentinel-1")
+        cop._select_mission()
+        cop._mission_var.set("Sentinel-2")
+        cop._select_mission()
+        self.assertEqual(cop.get_profile()["product"], "DEFAULT-THEME::a91f72")
+        cop._mission_var.set("Sentinel-1")
+        cop._select_mission()
+        cop._latitude_var.set("52.52")
+        cop._longitude_var.set("13.405")
+        cop._labels_var.set(False)
+        cop._coverage_var.set("Fill areas without image data with black")
+        cop._select_coverage()
+        self.assertEqual(str(cop._lookback_combo["state"]), "disabled")
+        provider, profiles = settings.get_selection()
+        self.assertEqual(provider, "copernicus")
+        self.assertEqual(profiles["copernicus"]["mission"], "Sentinel-1")
+        self.assertEqual(profiles["copernicus"]["latitude"], 52.52)
+        self.assertEqual(profiles["copernicus"]["longitude"], 13.405)
+        self.assertFalse(profiles["copernicus"]["map_labels"])
+        self.assertEqual(profiles["copernicus"]["coverage_mode"], "black")
+        self.assertEqual(profiles["copernicus"]["lookback_days"], 14)
+        self.assertNotIn("black_nodata", profiles["copernicus"])
+        self.assertEqual(settings.get_copernicus_auth(),
+                         {"client_id": "client", "client_secret": "secret"})
+
+        missing = self.make_settings("copernicus")
+        with self.assertRaises(ValueError):
+            missing.get_selection()
+
+    def test_active_storm_category_selects_and_commits_first_storm(self):
+        settings = self.make_settings("goes_east")
+        self.wait_for_catalogue(settings)
+        settings._category_var.set("Active storms")
+        settings._select_category()
+        self.assertEqual(settings._area_var.get(), "Storm One [storm_one]")
+        with self.assertRaises(ValueError):
+            settings.get_selection()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["goes_east"],
+                         {"area": "storm_one", "product": "GEOCOLOR", "resolution": "auto"})
+        self.select_provider(settings, "solar")
+        self.wait_for_catalogue(settings)
+        self.select_provider(settings, "goes_east")
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["area"], "storm_one")
+
+    def test_empty_selected_category_clears_the_previous_area(self):
+        settings = self.make_settings("goes_east")
+        self.wait_for_catalogue(settings)
+        settings._areas = [area for area in settings._areas if area["category"] != "Active storms"]
+        settings._category_var.set("Active storms")
+        settings._select_category()
+        self.assertEqual(settings._area_var.get(), "")
+        self.assertEqual(settings._product_var.get(), "")
+        self.assertEqual(settings._profiles["goes_east"]["area"], "")
+        with self.assertRaises(ValueError):
+            settings.get_selection()
+        settings._category_var.set("Local")
+        settings._select_category()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["goes_east"]["area"], "test_a")
+
+    def test_set_selection_loads_a_copy_and_rejects_obsolete_catalogue_results(self):
+        changes = []
+        settings = self.make_settings(on_change=changes.append)
+        saved = deepcopy(source_settings.DEFAULT_PROFILES)
+        saved["solar"]["resolution"] = "300x300"
+        self.select_provider(settings, "goes_east")
+        settings.set_selection("solar", saved)
+        saved["solar"]["resolution"] = "largest"
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[0], "solar")
+        self.assertEqual(settings.get_selection()[1]["solar"]["resolution"], "300x300")
+        self.assertEqual(settings._resolution_var.get(), "300x300")
+        self.assertEqual(changes, ["goes_east", "solar"])
+        self.assertEqual([area["id"] for area in settings._areas], ["sun"])
+
+    def test_set_selection_from_worker_calls_back_only_on_tk_thread(self):
+        callback_threads = []
+        settings = self.make_settings(on_change=lambda provider: callback_threads.append(threading.get_ident()))
+        saved = deepcopy(source_settings.DEFAULT_PROFILES)
+        worker = threading.Thread(target=settings.set_selection, args=("solar", saved))
+        worker.start()
+        worker.join(timeout=1)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(settings.provider, "eumetsat")
+        deadline = time.monotonic() + 5
+        while settings.provider != "solar":
+            if time.monotonic() > deadline:
+                self.fail("Queued source profile was not applied")
+            self.root.update()
+            time.sleep(0.01)
+        self.wait_for_catalogue(settings)
+        self.assertEqual(callback_threads, [threading.get_ident()])
+
+    def test_full_refresh_reports_progress_across_provider_and_profile_changes(self):
+        client = FakeNOAAClient()
+        client.all_refresh_gate = threading.Event()
+        settings = self.make_settings(client=client)
+        settings._refresh_all()
+        self.assertTrue(client.all_refresh_started.wait(1))
+        self.root.update()
+        settings._sync_global_refresh()
+        self.assertIn("1/4", settings._all_status_var.get())
+        self.assertEqual(settings._all_progress_var.get(), 25)
+        self.assertEqual(str(settings._all_refresh_button["state"]), "disabled")
+        settings._refresh_all()
+        self.assertEqual(client.calls.count(("all", True)), 1)
+        self.select_provider(settings, "goes_east")
+        settings.set_selection("solar", source_settings.DEFAULT_PROFILES)
+        client.all_refresh_gate.set()
+        deadline = time.monotonic() + 5
+        while settings._all_running:
+            if time.monotonic() > deadline:
+                self.fail("Full refresh did not finish")
+            self.root.update()
+            time.sleep(0.01)
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.provider, "solar")
+        self.assertIn("3 sources, 7 areas", settings._all_status_var.get())
+        self.assertEqual(settings._all_progress_var.get(), 100)
+        self.assertEqual(str(settings._all_refresh_button["state"]), "normal")
+
+    def test_initial_startup_refresh_is_observed_without_starting_a_second_job(self):
+        client = FakeNOAAClient()
+        client.catalogue_refresh_status = {"running": True, "done": 3, "total": 10,
+                                           "message": "Startup catalogue loading", "error": ""}
+        settings = self.make_settings(client=client)
+        self.assertIn("3/10", settings._all_status_var.get())
+        self.assertEqual(str(settings._all_refresh_button["state"]), "disabled")
+        settings._refresh_all()
+        self.assertEqual(client.calls, [])
+        client.catalogue_refresh_status = {"running": False, "done": 10, "total": 10,
+                                           "message": "All NOAA catalogues are ready.", "error": ""}
+        settings._sync_global_refresh()
+        self.assertIn("ready", settings._all_status_var.get())
+        self.assertEqual(str(settings._all_refresh_button["state"]), "normal")
+
+    def test_partial_full_refresh_warning_is_visible_without_disabling_current_selection(self):
+        client = FakeNOAAClient()
+        client.all_summary = {"providers": 3, "areas": 7, "products": 12, "resolution_options": 24,
+                              "errors": ["One storm unavailable"], "warning": "One storm unavailable", "complete": False}
+        settings = self.make_settings("goes_east", client=client)
+        self.wait_for_catalogue(settings)
+        settings._refresh_all()
+        deadline = time.monotonic() + 5
+        while settings._all_running:
+            if time.monotonic() > deadline:
+                self.fail("Full refresh did not finish")
+            self.root.update()
+            time.sleep(0.01)
+        self.wait_for_catalogue(settings)
+        self.assertIn("One storm unavailable", settings._all_status_var.get())
+        self.assertEqual(settings.get_selection()[0], "goes_east")
+
+    def test_close_does_not_cancel_shared_full_catalogue_refresh(self):
+        client = FakeNOAAClient()
+        client.all_refresh_gate = threading.Event()
+        settings = self.make_settings(client=client)
+        settings._refresh_all()
+        self.assertTrue(client.all_refresh_started.wait(1))
+        settings.close()
+        client.all_refresh_gate.set()
+        self._join_workers()
+        self.assertFalse(client.catalogue_refresh_status["running"])
+        self.assertIsNone(settings._after_id)
+
+
+if __name__ == "__main__":
+    unittest.main()
