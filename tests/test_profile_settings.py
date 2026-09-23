@@ -1,6 +1,7 @@
 """Hidden Tk tests for the profile draft editor; no user settings are written."""
 from copy import deepcopy
 import gc
+from types import SimpleNamespace
 import tkinter as tk
 import unittest
 from unittest.mock import Mock, patch
@@ -213,6 +214,25 @@ class ProfileSettingsTests(unittest.TestCase):
         passed["source"]["provider"] = "goes_west"
         self.assertEqual(self.ui.get_library(), before)
         self.load.assert_not_called()
+
+    def test_double_click_selects_and_applies_clicked_profile(self):
+        self.select(FIRST)
+        event = SimpleNamespace(x=20, y=40)
+        with patch.object(self.ui.tree, "identify_region", return_value="cell"), \
+                patch.object(self.ui.tree, "identify_row", return_value=SECOND):
+            result = self.ui._apply_double_clicked(event)
+        self.assertEqual(result, "break")
+        self.assertEqual(self.ui.tree.selection(), (SECOND,))
+        self.apply.assert_called_once_with({"source": {"provider": "solar"}})
+        self.load.assert_not_called()
+
+    def test_double_click_outside_profile_rows_does_nothing(self):
+        event = SimpleNamespace(x=20, y=5)
+        with patch.object(self.ui.tree, "identify_region", return_value="heading"), \
+                patch.object(self.ui.tree, "identify_row", return_value=""):
+            result = self.ui._apply_double_clicked(event)
+        self.assertIsNone(result)
+        self.apply.assert_not_called()
 
     def test_get_library_validates_current_rotation_inputs(self):
         self.ui.enabled_var.set(True)

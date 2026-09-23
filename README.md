@@ -145,6 +145,7 @@ Area/location, Lat, Long, and Coverage mode. Right-click a value to copy that
 cell or the complete row. `Ctrl+C` copies the selected row as tab-separated
 text. Right-click a column heading to show or hide columns. **Apply**, **OK**,
 or **Apply profile** saves the selected columns in `marblescape_config.toml`.
+Double-click a profile to apply it immediately.
 Drag a heading separator to resize a column; manual widths remain stable while
 the list refreshes or the Settings window changes size.
 Profile definitions and rotation order are stored separately in `profiles.toml`.

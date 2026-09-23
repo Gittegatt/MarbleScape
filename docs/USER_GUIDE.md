@@ -196,7 +196,8 @@ In **Profiles & Rotation**, give the current Image settings a name and select
 **Add current image**. Select an existing entry to update, rename, delete,
 or load it into Image. **Apply profile** next to **Load into Image** saves and
 activates the selected profile immediately and requests its image. Use Move
-up/down to choose the rotation order.
+up/down to choose the rotation order. Double-click a profile to apply it
+immediately.
 These changes remain drafts until **Apply** or **OK**; Cancel discards drafts.
 Loading a profile fills the Image form; Apply requests its image.
 

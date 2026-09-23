@@ -336,6 +336,7 @@ class ProfilesSettings:
         list_frame.configure(width=650, height=self.tree.winfo_reqheight() + horizontal.winfo_reqheight())
         list_frame.grid_propagate(False)
         self.tree.bind("<<TreeviewSelect>>", self._selection_changed)
+        self.tree.bind("<Double-1>", self._apply_double_clicked)
         self.tree.bind("<Button-3>", self._show_tree_menu)
         self.tree.bind("<Control-c>", self._copy_selected_row)
         self.tree.bind("<Control-C>", self._copy_selected_row)
@@ -469,6 +470,16 @@ class ProfilesSettings:
         self.tree.selection_set(item)
         self.tree.focus(item)
         self._cell_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _apply_double_clicked(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        item = self.tree.identify_row(event.y)
+        if region not in {"cell", "tree"} or not item:
+            return None
+        self.tree.selection_set(item)
+        self.tree.focus(item)
+        self.apply_selected()
         return "break"
 
     def _copy_to_clipboard(self, value):
