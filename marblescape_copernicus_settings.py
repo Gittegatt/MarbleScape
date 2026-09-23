@@ -8,6 +8,7 @@ from tkinter import ttk
 import webbrowser
 
 from marblescape_catalogue_activity import CatalogueActivity
+from marblescape_source_layout import SOURCE_COMBO_WIDTH, configure_source_columns
 
 from marblescape_copernicus import (
     ACCOUNT_SETTINGS_URL,
@@ -60,7 +61,7 @@ class CopernicusSettings:
                  user_agent="MarbleScape", output_size=(1920, 1080), on_change=None,
                  catalogue_client=None, catalogue_retries=2):
         self.frame = ttk.Frame(parent)
-        self.frame.columnconfigure(1, weight=1)
+        configure_source_columns(self.frame)
         self._timeout = timeout
         self._user_agent = user_agent
         self._output_size = output_size
@@ -211,7 +212,7 @@ class CopernicusSettings:
         )
         widget = ttk.Combobox(
             self.frame, textvariable=variable, values=values,
-            state="readonly", width=38,
+            state="readonly", width=SOURCE_COMBO_WIDTH,
         )
         widget.grid(row=row, column=1, pady=3, sticky="ew")
         return widget

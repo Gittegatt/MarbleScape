@@ -81,31 +81,43 @@ class _CatalogueDiskCache:
 
     def store_areas(self, provider, items):
         if not isinstance(items, list):
-            return
+            return False
         with self._lock:
             entry = self._data["providers"].setdefault(provider, {"areas": [], "products": {}})
+            if entry.get("areas") == items:
+                return False
             entry["areas"] = copy.deepcopy(items)
             entry.setdefault("products", {})
             self._save()
+            return True
 
     def store_products(self, provider, area_id, items):
         if not isinstance(items, list):
-            return
+            return False
         with self._lock:
             entry = self._data["providers"].setdefault(provider, {"areas": [], "products": {}})
             entry.setdefault("areas", [])
-            entry.setdefault("products", {})[str(area_id)] = copy.deepcopy(items)
+            products = entry.setdefault("products", {})
+            key = str(area_id)
+            if products.get(key) == items:
+                return False
+            products[key] = copy.deepcopy(items)
             self._save()
+            return True
 
     def store_provider(self, provider, areas, products):
         if not isinstance(areas, list) or not isinstance(products, dict):
-            return
+            return False
         with self._lock:
-            self._data["providers"][provider] = {
+            value = {
                 "areas": copy.deepcopy(areas),
                 "products": copy.deepcopy(products),
             }
+            if self._data["providers"].get(provider) == value:
+                return False
+            self._data["providers"][provider] = value
             self._save()
+            return True
 
     def eumetsat(self):
         with self._lock:
@@ -114,10 +126,13 @@ class _CatalogueDiskCache:
 
     def store_eumetsat(self, items):
         if not isinstance(items, list) or not items:
-            return
+            return False
         with self._lock:
+            if self._data["eumetsat"] == items:
+                return False
             self._data["eumetsat"] = copy.deepcopy(items)
             self._save()
+            return True
 
     @staticmethod
     def _copernicus_key(profile, output_size):
@@ -138,11 +153,15 @@ class _CatalogueDiskCache:
 
     def store_copernicus_dates(self, profile, output_size, dates):
         if not isinstance(dates, list):
-            return
+            return False
         key = self._copernicus_key(profile, output_size)
         with self._lock:
-            self._data["copernicus"][key] = {"dates": copy.deepcopy(dates)}
+            value = {"dates": copy.deepcopy(dates)}
+            if self._data["copernicus"].get(key) == value:
+                return False
+            self._data["copernicus"][key] = value
             self._save()
+            return True
 
     def summary(self, providers):
         with self._lock:
@@ -280,7 +299,7 @@ class CatalogueClient:
         client = self._client(provider)
         areas = client.list_areas(provider, refresh=False)
         if not areas:
-            return
+            return False
         products_by_area = {}
         for area in areas:
             area_id = area.get("id") if isinstance(area, dict) else None
@@ -288,7 +307,7 @@ class CatalogueClient:
                 products = client.list_products(provider, area_id, refresh=False)
                 if products:
                     products_by_area[str(area_id)] = products
-        self._cache.store_provider(provider, areas, products_by_area)
+        return self._cache.store_provider(provider, areas, products_by_area)
 
     def _cached_source_summary(self, label):
         if label == "EUMETSAT":
@@ -335,6 +354,7 @@ class CatalogueClient:
         summaries = []
         errors = []
         notices = []
+        updated_sources = 0
         try:
             sources = (
                     ("NOAA", self.noaa), ("Himawari", self.himawari),
@@ -344,6 +364,7 @@ class CatalogueClient:
             )
             for index, (label, client) in enumerate(sources, 1):
                 self._progress(index - 1, len(sources), f"Loading {label} catalogues...", progress)
+                cached_eumetsat = self._cache.eumetsat() if label == "EUMETSAT" else None
 
                 def source_progress(done, total, detail, source_index=index, source_label=label):
                     total = max(0, int(total))
@@ -396,8 +417,10 @@ class CatalogueClient:
                         summary = {**cached, "errors": [detail],
                                    "warning": detail, "complete": False}
                 else:
+                    changed = False
                     try:
                         if label == "EUMETSAT":
+                            changed = cached_eumetsat != items
                             self._cache.store_eumetsat(items)
                         else:
                             providers = tuple(NOAA_PROVIDERS) if label == "NOAA" else {
@@ -405,9 +428,11 @@ class CatalogueClient:
                                 "NASA Worldview": ("worldview",),
                             }[label]
                             for provider in providers:
-                                self._cache_provider(provider)
+                                changed = self._cache_provider(provider) or changed
                     except Exception:
                         pass
+                    summary["updated"] = changed
+                    updated_sources += int(changed)
                 summaries.append(summary)
                 source_errors = [str(value) for value in summary.get("errors", ())]
                 errors.extend(source_errors)
@@ -427,8 +452,13 @@ class CatalogueClient:
                 for key in ("providers", "areas", "products", "resolution_options")
             }
             result.update(errors=errors, warning=warning,
-                          complete=not details and all(value.get("complete") for value in summaries))
-            message = "Catalogue refresh completed." if result["complete"] else "Catalogue refresh completed with unavailable entries."
+                          complete=not details and all(value.get("complete") for value in summaries),
+                          updated_sources=updated_sources)
+            if result["complete"]:
+                message = ("Catalogue update completed." if updated_sources else
+                           "Catalogue check completed; local catalogues are already current.")
+            else:
+                message = "Catalogue refresh completed with unavailable entries."
             with self._lock:
                 self._status.update(running=False, done=len(sources), total=len(sources),
                                     message=message, error=warning)

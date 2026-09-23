@@ -282,6 +282,38 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
 
         self.run_dialog(scenario)
 
+    def test_source_dropdowns_share_one_width_and_label_column(self):
+        from tkinter import ttk
+        from marblescape_source_layout import (
+            SOURCE_COMBO_WIDTH,
+            SOURCE_LABEL_COLUMN_MINSIZE,
+        )
+
+        def scenario(context):
+            combos = [
+                widget for widget in self.descendants(context.source.frame)
+                if isinstance(widget, ttk.Combobox)
+            ]
+            self.assertGreater(len(combos), 10)
+            self.assertEqual(
+                {int(widget.cget("width")) for widget in combos},
+                {SOURCE_COMBO_WIDTH},
+            )
+            frames = (
+                context.source.frame,
+                context.source.eumetsat_settings.frame,
+                context.source.eumetsat_view_frame,
+                context.source.generic_view_frame,
+                context.source.copernicus_settings.frame,
+            )
+            self.assertTrue(all(
+                int(frame.grid_columnconfigure(0)["minsize"])
+                == SOURCE_LABEL_COLUMN_MINSIZE
+                for frame in frames
+            ))
+
+        self.run_dialog(scenario)
+
     def test_download_tab_persists_speed_progress_and_bar_preferences(self):
         from tkinter import ttk
 

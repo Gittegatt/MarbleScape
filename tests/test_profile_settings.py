@@ -127,6 +127,17 @@ class ProfileSettingsTests(unittest.TestCase):
         self.assertEqual(self.ui.get_visible_columns(), (last_column,))
         self.assertTrue(self.ui._column_visibility_vars[last_column].get())
 
+    def test_manual_column_width_survives_refresh_and_layout_changes(self):
+        self.ui.tree.column("name", width=237)
+        self.ui._refresh(SECOND)
+        self.root.geometry("900x650")
+        self.root.update()
+        self.assertEqual(self.ui.tree.column("name", "width"), 237)
+        self.assertTrue(all(
+            not bool(self.ui.tree.column(column, "stretch"))
+            for column in self.ui.tree["columns"]
+        ))
+
     def test_add_and_update_capture_current_image_as_independent_draft(self):
         self.ui.name_var.set("Americas")
         self.ui.buttons["Add current image"].invoke()

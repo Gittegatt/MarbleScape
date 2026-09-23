@@ -308,6 +308,7 @@ try {
         "marblescape_copernicus.py",
         "marblescape_copernicus_settings.py",
         "marblescape_copernicus_catalog.json",
+        "marblescape_source_layout.py",
         "marblescape_source_settings.py",
         "marblescape_cache.py",
         "marblescape_profiles.py",

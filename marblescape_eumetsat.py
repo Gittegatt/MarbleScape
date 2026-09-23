@@ -16,6 +16,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from marblescape_catalogue_activity import CatalogueActivity
+from marblescape_source_layout import SOURCE_COMBO_WIDTH, configure_source_columns
 from urllib.request import Request, urlopen
 
 
@@ -346,9 +347,11 @@ class EumetsatCatalogueClient:
                 if isinstance(problem, EumetsatCatalogueError):
                     raise problem
                 raise EumetsatCatalogueError(message) from problem
-            self._catalogue = catalogue
+            changed = catalogue != self._catalogue
+            if changed:
+                self._catalogue = catalogue
             self.catalogue_warning = ""
-            if self._on_catalogue:
+            if changed and self._on_catalogue:
                 try:
                     self._on_catalogue(catalogue)
                 except Exception:
@@ -381,7 +384,7 @@ class EumetsatSettings:
     def __init__(self, parent, profile, timeout=90, user_agent="MarbleScape",
                  on_change=None, client=None, auto_refresh=True):
         self.frame = ttk.Frame(parent)
-        self.frame.columnconfigure(1, weight=1)
+        configure_source_columns(self.frame)
         self._profile = normalize_profile(profile)
         self._on_change = on_change
         self._client = client or EumetsatCatalogueClient(timeout, user_agent)
@@ -424,7 +427,7 @@ class EumetsatSettings:
         self._layer_combo = self._combo(4, "Product / layer", self._layer_var)
         self.view_frame = ttk.Frame(self.frame)
         self.view_frame.grid(row=5, column=0, columnspan=2, pady=(2, 0), sticky="ew")
-        self.view_frame.columnconfigure(1, weight=1)
+        configure_source_columns(self.view_frame)
         self._theme_combo.bind("<<ComboboxSelected>>", self._theme_changed)
         self._satellite_combo.bind("<<ComboboxSelected>>", self._satellite_changed)
         self._mission_combo.bind("<<ComboboxSelected>>", self._mission_changed)
@@ -478,7 +481,7 @@ class EumetsatSettings:
             row=row, column=0, padx=(0, 10), pady=3, sticky="w"
         )
         combo = ttk.Combobox(
-            self.frame, textvariable=variable, state="readonly", width=42
+            self.frame, textvariable=variable, state="readonly", width=SOURCE_COMBO_WIDTH
         )
         combo.grid(row=row, column=1, pady=3, sticky="ew")
         return combo

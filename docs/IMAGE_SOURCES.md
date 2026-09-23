@@ -140,7 +140,9 @@ startup and refreshes the selected source catalogue when its Image source is
 selected. The last successful metadata is also stored in
 `content/catalogues.json`. If a provider is unavailable or returns an
 incomplete catalogue, MarbleScape reports the problem and uses this disk cache
-when it contains the requested source. NOAA area metadata expires after five
+when it contains the requested source. Successful remote results are compared
+with the local values first; identical catalogues do not rewrite the cache.
+NOAA area metadata expires after five
 minutes; product lists and Himawari metadata retain their provider-level memory
 caches between explicit refreshes.
 When Copernicus OAuth credentials are configured, startup also refreshes and

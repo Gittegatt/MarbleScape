@@ -6411,6 +6411,7 @@ def run_with_windows_tray(argv=None):
     def run_settings_dialog(icon):
         import tkinter as tk
         from tkinter import colorchooser, filedialog, messagebox, ttk
+        from marblescape_source_layout import SOURCE_COMBO_WIDTH, configure_source_columns
         from marblescape_source_settings import SourceSettings
 
         root = create_tray_dialog_root(tk)
@@ -7216,7 +7217,8 @@ def run_with_windows_tray(argv=None):
         source_settings.frame.grid(row=0, column=0, pady=(0, 8), sticky="ew")
         generic_view_frame = source_settings.generic_view_frame
         add_combo(
-            generic_view_frame, 0, "Fit mode", variables["fit_mode"], ("fit", "crop")
+            generic_view_frame, 0, "Fit mode", variables["fit_mode"], ("fit", "crop"),
+            width=SOURCE_COMBO_WIDTH,
         )
         add_entry(generic_view_frame, 1, "Zoom", variables["zoom"])
         ttk.Label(generic_view_frame, wraplength=640, text=(
@@ -7224,15 +7226,19 @@ def run_with_windows_tray(argv=None):
             "General > Wallpaper > Position then places the finished file on the desktop."
         )).grid(row=2, column=0, columnspan=2, pady=(3, 0), sticky="w")
         preset_frame = source_settings.eumetsat_view_frame
+        configure_source_columns(preset_frame)
         projection_combo = add_combo(
             preset_frame, 0, "Projection", variables["projection"],
-            available_projection_choices(), width=30,
+            available_projection_choices(), width=SOURCE_COMBO_WIDTH,
         )
         projection_combo.bind("<<ComboboxSelected>>", select_projection)
-        add_combo(preset_frame, 1, "Fit mode", variables["fit_mode"], ("fit", "crop"))
+        add_combo(
+            preset_frame, 1, "Fit mode", variables["fit_mode"], ("fit", "crop"),
+            width=SOURCE_COMBO_WIDTH,
+        )
         add_entry(preset_frame, 2, "Zoom", variables["zoom"])
         preset_combo = add_combo(preset_frame, 3, "Preset", variables["view_preset"],
-                                 tuple(preset_label_to_value), width=38)
+                                 tuple(preset_label_to_value), width=SOURCE_COMBO_WIDTH)
         preset_combo.bind("<<ComboboxSelected>>", select_view_preset)
         ttk.Checkbutton(
             preset_frame,

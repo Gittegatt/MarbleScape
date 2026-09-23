@@ -5,11 +5,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 from PIL import Image
 
 import marblescape_himawari as himawari
-from marblescape_catalogues import CatalogueClient
+from marblescape_catalogues import CatalogueClient, _CatalogueDiskCache
 
 
 def png(size, color, mode="RGB"):
@@ -42,6 +43,24 @@ class FixtureClient(himawari.HimawariClient):
 
 
 class HimawariTests(unittest.TestCase):
+    def test_catalogue_cache_writes_only_changed_values(self):
+        cache = _CatalogueDiskCache()
+        cache._save = Mock()
+        areas = [{"id": "full_disk"}]
+        products = [{"id": "true_color", "resolutions": ["550x550"]}]
+        eumetsat = [{"layer": "mtg_fd:rgb_geocolour"}]
+        profile = {"configuration": "default", "latitude": 1, "longitude": 2}
+
+        self.assertTrue(cache.store_areas("himawari", areas))
+        self.assertFalse(cache.store_areas("himawari", areas))
+        self.assertTrue(cache.store_products("himawari", "full_disk", products))
+        self.assertFalse(cache.store_products("himawari", "full_disk", products))
+        self.assertTrue(cache.store_eumetsat(eumetsat))
+        self.assertFalse(cache.store_eumetsat(eumetsat))
+        self.assertTrue(cache.store_copernicus_dates(profile, (1920, 1080), ["2026-09-23"]))
+        self.assertFalse(cache.store_copernicus_dates(profile, (1920, 1080), ["2026-09-23"]))
+        self.assertEqual(cache._save.call_count, 4)
+
     def test_catalogue_contains_nict_bands_and_all_published_jma_regions(self):
         client = FixtureClient()
         areas = client.list_areas("himawari")
@@ -246,12 +265,17 @@ class HimawariTests(unittest.TestCase):
         self.assertEqual(result["products"], 2502)
         self.assertEqual(result["resolution_options"], 8038)
         self.assertTrue(result["complete"])
+        self.assertEqual(result["updated_sources"], 5)
         self.assertEqual(client.catalogue_refresh_status["running"], False)
         self.assertTrue(any(0 < done < 1 and "NOAA" in message
                             for done, total, message in updates))
         self.assertTrue(any(1 < done < 2 and "Himawari" in message
                             for done, total, message in updates))
         self.assertEqual(updates[-1][:2], (5, 5))
+
+        unchanged = client.refresh_all_catalogues(refresh=True)
+        self.assertEqual(unchanged["updated_sources"], 0)
+        self.assertIn("already current", client.catalogue_refresh_status["message"])
 
         noaa.summary = {
             "providers": 0, "areas": 0, "products": 0,

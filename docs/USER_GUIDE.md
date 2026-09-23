@@ -212,6 +212,8 @@ no applicable coverage setting. The successfully applied rotation entry is
 marked **Active**. Right-click a value to copy that cell or its complete row;
 `Ctrl+C` copies the selected row as tab-separated text. Right-click a column
 heading to show or hide individual columns. At least one column remains visible,
+and heading separators can be dragged to resize columns without automatic
+stretching them back during list or window updates. Column visibility is persistent,
 and **Apply** or **OK** saves the selection in `marblescape_config.toml` under
 `[profile_list]`. Latest
 profiles show the acquisition time of their last successfully used provider

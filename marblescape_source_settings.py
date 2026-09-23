@@ -18,6 +18,7 @@ from marblescape_eumetsat import (
     EumetsatSettings,
     normalize_profile as normalize_eumetsat_profile,
 )
+from marblescape_source_layout import SOURCE_COMBO_WIDTH, configure_source_columns
 from marblescape_worldview import DEFAULT_PROFILE as DEFAULT_WORLDVIEW_PROFILE
 
 
@@ -111,7 +112,7 @@ class SourceSettings:
                  copernicus_auth=None, output_size=(1920, 1080),
                  eumetsat_layer=None):
         self.frame = ttk.LabelFrame(parent, text="Source", padding=8)
-        self.frame.columnconfigure(1, weight=1)
+        configure_source_columns(self.frame)
         self._on_change = on_change
         self._view_defaults_requested = False
         self._replace_profiles(profiles)
@@ -164,7 +165,7 @@ class SourceSettings:
         # EUMETSAT owns a dependent catalogue; the host adds view controls below it.
         self.eumetsat_frame = ttk.Frame(self.frame)
         self.eumetsat_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
-        self.eumetsat_frame.columnconfigure(1, weight=1)
+        configure_source_columns(self.eumetsat_frame)
         self.eumetsat_settings = EumetsatSettings(
             self.eumetsat_frame,
             self._profiles["eumetsat"],
@@ -210,7 +211,7 @@ class SourceSettings:
         self.generic_view_frame.grid(
             row=9, column=0, columnspan=2, pady=(2, 0), sticky="ew"
         )
-        self.generic_view_frame.columnconfigure(1, weight=1)
+        configure_source_columns(self.generic_view_frame)
         self._slider_note = ttk.Label(
             self.frame,
             text="CIRA product tiles are loaded without map borders or latitude/longitude lines.",
@@ -334,7 +335,7 @@ class SourceSettings:
         label = ttk.Label(self.frame, text=text)
         label.grid(row=row, column=0, padx=(0, 10), pady=3, sticky="w")
         combo = ttk.Combobox(self.frame, textvariable=variable, values=choices,
-                             state="readonly", width=38)
+                             state="readonly", width=SOURCE_COMBO_WIDTH)
         combo.grid(row=row, column=1, pady=3, sticky="ew")
         return combo, label
 
@@ -885,7 +886,8 @@ class SourceSettings:
             if not warning and summary.get("errors"):
                 warning = " | ".join(str(value) for value in summary["errors"][:3])
             if summary.get("complete", not warning):
-                message = "All catalogues updated: " + counts + "."
+                message = (("All catalogues already current: " if summary.get("updated_sources") == 0
+                            else "All catalogues updated: ") + counts + ".")
             else:
                 message = "Available catalogue data: " + counts + "."
             if warning:
