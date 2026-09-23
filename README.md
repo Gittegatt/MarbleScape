@@ -80,7 +80,7 @@ The same guidance is available inside MarbleScape under **Info**.
 
 1. Open the original viewer from MarbleScape's **Sources** tab.
 2. Explore its satellite, mission, product, layer, projection, area, and date controls.
-3. Transfer the useful choices to MarbleScape and configure the output for your monitor.
+3. Transfer the useful choices to MarbleScape and configure **General > Output** for your monitor.
 4. Select **Apply**, inspect the wallpaper, and refine the framing if needed.
 5. Save the finished Image settings as a profile under **Profiles & Rotation**.
 

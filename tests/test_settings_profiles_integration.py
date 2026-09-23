@@ -262,6 +262,26 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
             self.assertEqual(tomllib.loads(restored)["output"], after["output"])
         self.run_dialog(scenario)
 
+    def test_output_section_is_below_updates_on_general_tab(self):
+        from tkinter import ttk
+
+        def scenario(context):
+            sections = {
+                widget.cget("text"): widget
+                for widget in self.descendants(context.root)
+                if isinstance(widget, ttk.LabelFrame)
+                and widget.cget("text") in {"Updates", "Output"}
+            }
+            self.assertEqual(set(sections), {"Updates", "Output"})
+            self.assertIs(sections["Output"].master, sections["Updates"].master)
+            self.assertGreater(
+                sections["Output"].grid_info()["row"],
+                sections["Updates"].grid_info()["row"],
+            )
+            self.assertIsNot(sections["Output"].master, context.source.frame.master)
+
+        self.run_dialog(scenario)
+
     def test_download_tab_persists_speed_progress_and_bar_preferences(self):
         from tkinter import ttk
 

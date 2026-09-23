@@ -282,8 +282,9 @@ BEST_PRACTICE_TEXT = (
     "a clear preview of the source data before you configure the wallpaper.\n\n"
     "Then transfer the relevant choices to MarbleScape: image source, satellite, "
     "mission, product, layer, projection, area, custom latitude and longitude, zoom, "
-    "date, coverage options, and any other source-specific settings. Configure the "
-    "output width, height, aspect ratio, fit mode, and wallpaper position for your "
+    "date, coverage options, and any other source-specific settings. Under General > "
+    "Output, configure the width, height, and aspect ratio for your monitor. Set the "
+    "fit mode and wallpaper position for your "
     "monitor. Select Apply, review the resulting wallpaper, and refine the settings "
     "if necessary. Once the result is satisfactory, save the current Image settings "
     "as a profile under Profiles & Rotation so the same view can be restored or "
@@ -7075,8 +7076,8 @@ def run_with_windows_tray(argv=None):
             "Provider and cache timestamps remain stored in UTC."
         )).grid(row=1, column=0, columnspan=2, pady=(4, 0), sticky="w")
 
-        output_frame = ttk.LabelFrame(image_tab, text="Output", padding=8)
-        output_frame.grid(row=3, column=0, pady=(0, 8), sticky="ew")
+        output_frame = ttk.LabelFrame(general_tab, text="Output", padding=8)
+        output_frame.grid(row=4, column=0, pady=(0, 8), sticky="ew")
         resolution_combo = add_combo(
             output_frame,
             0,

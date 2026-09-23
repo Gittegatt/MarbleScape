@@ -149,10 +149,10 @@ where the provider offers one. Sources that use another name default to the
 closest natural or true-color product. Solar remains on its wavelength product
 because GeoColor does not apply to the Sun.
 
-The separate Output section provides wallpaper resolution and aspect-ratio
+**General > Output**, directly below **Updates**, provides wallpaper resolution and aspect-ratio
 presets. Selecting a preset fills the editable width, height, and ratio
 fields; choose `Custom` or edit those fields directly for another size.
-The NOAA, Himawari, or CIRA SLIDER source resolution controls the downloaded image, while Output
+The NOAA, Himawari, or CIRA SLIDER source resolution controls the downloaded image, while **General > Output**
 controls the resulting wallpaper dimensions. Fit mode, zoom, and background
 color determine its framing. EUMETSAT projection, layer composition,
 render quality, and TrueColor night controls apply only to EUMETSAT.
