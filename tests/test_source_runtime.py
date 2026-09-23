@@ -270,6 +270,9 @@ class SourceRuntimeTests(unittest.TestCase):
         provider, first = app.normalize_source_configuration("eumetsat", {})
         _, second = app.normalize_source_configuration("eumetsat", {})
         self.assertEqual(provider, "eumetsat")
+        for source in ("goes_east", "goes_west", "solar", "himawari", "slider"):
+            self.assertEqual(app.DEFAULT_SOURCE_PROFILES[source]["resolution"], "auto")
+            self.assertEqual(second[source]["resolution"], "auto")
         first["goes_east"]["product"] = "13"
         self.assertEqual(second["goes_east"]["product"], "GEOCOLOR")
         self.assertEqual(app.DEFAULT_SOURCE_PROFILES["goes_east"]["product"], "GEOCOLOR")
