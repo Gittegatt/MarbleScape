@@ -4,10 +4,8 @@ import datetime
 import math
 import tomllib
 import unittest
-from unittest.mock import patch
 from marblescape_profiles import (MAX_INPUT_BYTES, RotationScheduler, new_profile_id,
-                                 normalize_library, read_library, remove_library,
-                                 replace_library, serialize_library, toml_value)
+                                 normalize_library, serialize_library, toml_value)
 
 FIRST, SECOND, THIRD = "1" * 32, "2" * 32, "3" * 32
 
@@ -41,10 +39,10 @@ class FakeClock:
 
 
 class ProfileLibraryTests(unittest.TestCase):
-    def test_old_config_defaults_and_independent_snapshots(self):
+    def test_defaults_and_independent_snapshots(self):
         expected = {"version": 1, "items": [], "rotation": {
             "enabled": False, "interval": 15, "unit": "minutes", "order": []}}
-        self.assertEqual(read_library({"source": {"provider": "eumetsat"}}), expected)
+        self.assertEqual(normalize_library({}), expected)
         original = library()
         copied = normalize_library(original)
         original["items"][0]["settings"]["layers"][0]["opacity"] = 0.1
@@ -117,71 +115,16 @@ class ProfileLibraryTests(unittest.TestCase):
         layers = profile()["settings"]["layers"]
         self.assertEqual(tomllib.loads("layers = " + toml_value(layers))["layers"], layers)
 
-    def test_append_and_replace_keep_unrelated_settings_and_comments(self):
-        original = '# Keep\n[service]\nendpoint = "https://example.invalid/wms"\n\n[[layers]]\nname = "original:layer"\n'
-        result = replace_library(original, library())
-        self.assertTrue(result.startswith(original))
-        self.assertEqual(read_library(tomllib.loads(result)), library())
-        self.assertEqual(tomllib.loads(result)["layers"], [{"name": "original:layer"}])
-        repeated = replace_library(result, library())
-        self.assertEqual(read_library(tomllib.loads(repeated)), library())
-        self.assertEqual(repeated.count("[image_profiles]"), 1)
-
-    def test_standalone_document_and_legacy_removal_roundtrip(self):
+    def test_standalone_document_roundtrip(self):
         standalone = serialize_library(library())
-        self.assertEqual(set(tomllib.loads(standalone)), {"image_profiles"})
-        self.assertEqual(read_library(tomllib.loads(standalone)), library())
-        original = (
-            '# Keep\n[source]\nprovider = "eumetsat"\n\n' + standalone
-            + '\n[output]\nwidth = 2560\n'
-        )
-        updated = remove_library(original)
-        self.assertNotIn("image_profiles", tomllib.loads(updated))
-        self.assertEqual(
-            tomllib.loads(updated),
-            {"source": {"provider": "eumetsat"}, "output": {"width": 2560}},
-        )
-        self.assertIn("# Keep", updated)
-
-    def test_crlf_preserved_outside_and_inside_replacement(self):
-        before = '# Before\r\n[source]\r\nprovider = "eumetsat"\r\n\r\n'
-        after = '[output]\r\nwidth = 3840 # Keep\r\n'
-        old = before + '[image_profiles]\r\nversion = 1\r\nitems = []\r\n\r\n' + after
-        result = replace_library(old, library())
-        self.assertTrue(result.startswith(before))
-        self.assertTrue(result.endswith(after))
-        self.assertNotIn("\n", result.replace("\r\n", ""))
-        self.assertEqual(read_library(tomllib.loads(result)), library())
-
-    def test_nested_profile_tables_and_interleaved_unrelated_tables(self):
-        old = ('[image_profiles]\nversion = 1\n[output]\nwidth = 100 # Keep\n\n'
-               '[[image_profiles.items]]\nid = "' + FIRST + '"\nname = "Before"\n'
-               '[image_profiles.items.settings.source]\nprovider = "solar"\n'
-               '[image_profiles.rotation]\nenabled = false\n')
-        result = replace_library(old, library())
-        self.assertIn('[output]\nwidth = 100 # Keep\n\n', result)
-        self.assertNotIn("[[image_profiles.items]]", result)
-        self.assertEqual(read_library(tomllib.loads(result)), library())
-
-    def test_table_text_in_strings_or_arrays_is_not_a_table(self):
-        original = ('[service]\nnote = """Keep\n[image_profiles]\nitems = []\n"""\n'
-                    'values = [\n ["image_profiles"],\n [1, 2],\n]\n'
-                    '["image_profiles"] # Actual\nversion = 1\nitems = []\n')
-        result = replace_library(original, library())
-        self.assertEqual(tomllib.loads(result)["service"], tomllib.loads(original)["service"])
-        self.assertEqual(read_library(tomllib.loads(result)), library())
-        for quote in ('"', "'"):
-            for count in (3, 4, 5):
-                original = '[service]\nnote = ' + quote*3 + 'text' + quote*count + '\n[image_profiles]\nitems = []\n'
-                result = replace_library(original, library())
-                self.assertEqual(tomllib.loads(result)["service"], tomllib.loads(original)["service"])
-
-    def test_invalid_or_excessive_toml_rejected_and_no_file_io(self):
-        for text in ('[invalid', 'image_profiles = {}\n', '# ' + 'x' * MAX_INPUT_BYTES):
-            with self.subTest(text=text[:30]), self.assertRaises(ValueError):
-                replace_library(text, library())
-        with patch("builtins.open", side_effect=AssertionError("Unexpected file I/O")):
-            self.assertEqual(read_library(tomllib.loads(replace_library('', library()))), library())
+        parsed = tomllib.loads(standalone)
+        self.assertEqual(set(parsed), {"image_profiles"})
+        self.assertEqual(normalize_library(parsed["image_profiles"]), library())
+        crlf = serialize_library(library(), newline="\r\n")
+        self.assertNotIn("\n", crlf.replace("\r\n", ""))
+        self.assertEqual(normalize_library(tomllib.loads(crlf)["image_profiles"]), library())
+        with self.assertRaises(ValueError):
+            serialize_library(library(), newline="\r")
 
 
 class RotationSchedulerTests(unittest.TestCase):
@@ -233,6 +176,18 @@ class RotationSchedulerTests(unittest.TestCase):
         self.assertFalse(self.scheduler.due())
         self.clock.advance(1)
         self.assertEqual(self.scheduler.start_next()["id"], SECOND)
+
+    def test_global_limit_and_exhausted_download_skip_without_extra_profile_attempts(self):
+        self.scheduler.set_max_attempts(10)
+        self.scheduler.start_next()
+        self.assertEqual([self.scheduler.failure() for _ in range(9)], ["retry"] * 9)
+        self.assertEqual(self.scheduler.failure(), "skip")
+        self.scheduler.start_next()
+        self.assertEqual(self.scheduler.failure(exhausted=True), "wait")
+        self.assertEqual(self.scheduler.attempts, 10)
+        for value in (1, 11, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.scheduler.set_max_attempts(value)
 
     def test_single_profile_waits_after_third_failure(self):
         scheduler = RotationScheduler(library(order=[FIRST]), clock=self.clock)

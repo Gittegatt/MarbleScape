@@ -304,6 +304,7 @@ try {
         "marblescape_worldview.py",
         "marblescape_eumetsat.py",
         "marblescape_catalogues.py",
+        "marblescape_catalogue_activity.py",
         "marblescape_copernicus.py",
         "marblescape_copernicus_settings.py",
         "marblescape_copernicus_catalog.json",
@@ -387,6 +388,13 @@ try {
     Copy-Item -LiteralPath $projectLicence -Destination $windowsPackageDirectory
 
     foreach ($packageDirectory in @($sourcePackageDirectory, $windowsPackageDirectory)) {
+        $documentationSource = Join-Path $projectRoot "docs"
+        if (-not (Test-Path -LiteralPath $documentationSource -PathType Container)) {
+            throw "Documentation directory not found: $documentationSource"
+        }
+        Assert-NotReparsePoint -Path $documentationSource
+        Copy-Item -LiteralPath $documentationSource -Destination $packageDirectory -Recurse
+
         $examplesDirectory = Join-Path $packageDirectory "assets\examples"
         New-Item -ItemType Directory -Path $examplesDirectory -Force | Out-Null
         foreach ($exampleName in @(

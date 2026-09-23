@@ -10,12 +10,14 @@ import calendar
 from copy import deepcopy
 import ctypes
 import datetime as dt
+import http.client
 import hashlib
 import io
 import json
 import math
 import os
 import re
+import ssl
 import shutil
 import subprocess
 import sys
@@ -53,8 +55,6 @@ from marblescape_copernicus import (
 from marblescape_profiles import (
     RotationScheduler,
     normalize_library,
-    read_library,
-    remove_library,
     serialize_library,
 )
 from marblescape_cache import get_profile_image_cache, signature_digest
@@ -86,7 +86,7 @@ else:
     RESOURCE_DIR = SCRIPT_DIR
 
 # Ordered from bottom to top. Kinds "basemap" and "overlay" accept the friendly
-# EUMETView names handled below; kind "wms" uses an exact capabilities name.
+# Friendly EUMETSAT names are handled below; kind "wms" uses an exact capabilities name.
 LAYER_CONFIG = [
     {
         "kind": "basemap",
@@ -153,9 +153,6 @@ VIEW_MODE = "fit"
 DEFAULT_ZOOM = 1.1
 ZOOM = DEFAULT_ZOOM
 
-# Retained for configuration compatibility; all official projections are shown.
-SHOW_EXTENDED_PROJECTIONS = False
-
 # When enabled, MTG TrueColor shows only the sunlit area. The remainder of
 # the Earth disk is filled with black while the area outside the disk keeps
 # the configured background color.
@@ -208,7 +205,7 @@ HISTORY_RETENTION_HOURS = 0
 HISTORY_RETENTION_MINUTES = 0
 
 # Optional fixed image time in ISO 8601 format.
-# None requests the latest image currently available from EUMETView.
+# None requests the latest image currently available from EUMETSAT.
 IMAGE_TIME = None
 
 # Background color used outside rendered map content.
@@ -224,11 +221,20 @@ DEFAULT_DOWNLOAD_SPEED_UNIT = "automatic"
 DEFAULT_SHOW_DOWNLOAD_PROGRESS = True
 DEFAULT_SHOW_DOWNLOAD_PROGRESS_BAR = True
 DEFAULT_KEEP_COMPLETED_DOWNLOAD_VISIBLE = False
+DEFAULT_DOWNLOAD_RETRIES = 2
+DEFAULT_CATALOGUE_RETRIES = 2
+DEFAULT_PROFILE_LIST_COLUMNS = (
+    "name", "source", "selection", "time", "location", "latitude", "longitude",
+    "coverage",
+)
 SHOW_DOWNLOAD_SPEED = DEFAULT_SHOW_DOWNLOAD_SPEED
 DOWNLOAD_SPEED_UNIT = DEFAULT_DOWNLOAD_SPEED_UNIT
 SHOW_DOWNLOAD_PROGRESS = DEFAULT_SHOW_DOWNLOAD_PROGRESS
 SHOW_DOWNLOAD_PROGRESS_BAR = DEFAULT_SHOW_DOWNLOAD_PROGRESS_BAR
 KEEP_COMPLETED_DOWNLOAD_VISIBLE = DEFAULT_KEEP_COMPLETED_DOWNLOAD_VISIBLE
+DOWNLOAD_RETRIES = DEFAULT_DOWNLOAD_RETRIES
+CATALOGUE_RETRIES = DEFAULT_CATALOGUE_RETRIES
+PROFILE_LIST_VISIBLE_COLUMNS = DEFAULT_PROFILE_LIST_COLUMNS
 DOWNLOAD_SPEED_UNITS = ("automatic", "KB/s", "MB/s", "Mbit/s")
 DOWNLOAD_SPEED_UNIT_CHOICES = ("Automatic", "KB/s", "MB/s", "Mbit/s")
 
@@ -243,19 +249,19 @@ GITHUB_LATEST_RELEASE_API = (
 GITHUB_TAGS_API = "https://api.github.com/repos/Gittegatt/MarbleScape/tags?per_page=1"
 MAX_GITHUB_RESPONSE_BYTES = 1_000_000
 SOURCE_VIEWER_URLS = (
-    ("EUMETSAT / EUMETView", (
+    ("EUMETSAT", (
         "https://view.eumetsat.int/productviewer",
     )),
-    ("NOAA STAR — GOES-East and GOES-West", (
+    ("NOAA STAR - GOES-East and GOES-West", (
         "https://www.star.nesdis.noaa.gov/goes/index.php",
     )),
-    ("NOAA STAR — Solar (SUVI)", (
+    ("NOAA STAR - Solar (SUVI)", (
         "https://www.star.nesdis.noaa.gov/goes/SUVI.php?sat=G19",
     )),
-    ("Himawari — NICT", (
+    ("Himawari - NICT", (
         "https://himawari8.nict.go.jp/",
     )),
-    ("Himawari — JMA", (
+    ("Himawari - JMA", (
         "https://ds.data.jma.go.jp/mscweb/data/himawari/index.html",
     )),
     ("CIRA SLIDER", (
@@ -267,6 +273,28 @@ SOURCE_VIEWER_URLS = (
     ("Copernicus Browser", (
         "https://browser.dataspace.copernicus.eu/",
     )),
+)
+BEST_PRACTICE_TEXT = (
+    "The easiest way to create the satellite view you want is to begin with the "
+    "original browser for that image source. Open the source website from the "
+    "Sources tab in MarbleScape, explore its available views, and adjust the "
+    "visualization until the imagery matches your intended result. This gives you "
+    "a clear preview of the source data before you configure the wallpaper.\n\n"
+    "Then transfer the relevant choices to MarbleScape: image source, satellite, "
+    "mission, product, layer, projection, area, custom latitude and longitude, zoom, "
+    "date, coverage options, and any other source-specific settings. Configure the "
+    "output width, height, aspect ratio, fit mode, and wallpaper position for your "
+    "monitor. Select Apply, review the resulting wallpaper, and refine the settings "
+    "if necessary. Once the result is satisfactory, save the current Image settings "
+    "as a profile under Profiles & Rotation so the same view can be restored or "
+    "included in a rotation.\n\n"
+    "For cleaner edges, finer details, and fewer visible stair-step artifacts, choose "
+    "a source resolution one available size above the required output when bandwidth "
+    "and provider limits allow it. Automatic remains the efficient starting point.\n\n"
+    "Provider websites and MarbleScape can use slightly different labels or expose "
+    "different subsets of the same catalogue. Use the actual satellite view and "
+    "geographic result as the reference when matching settings. Satellite imagery can "
+    "contain seams, processing artifacts, and areas with missing or partial imagery."
 )
 
 # Each image provider keeps its own selection; old configurations use EUMETSAT.
@@ -308,7 +336,7 @@ COPERNICUS_CLIENT_SECRET = ""
 COPERNICUS_CLIENT_SECRET_PROTECTED = ""
 COPERNICUS_CLIENTS = {}
 COPERNICUS_CLIENTS_LOCK = threading.Lock()
-IMAGE_PROFILE_LIBRARY = read_library({})
+IMAGE_PROFILE_LIBRARY = normalize_library({})
 ROTATION_STATUS_LOCK = threading.Lock()
 ROTATION_STATUS = {"text": "Rotation is disabled.", "deadline": None,
                    "active_profile_id": None}
@@ -423,14 +451,8 @@ PROJECTIONS = {
     },
 }
 
-EXTENDED_PROJECTIONS = frozenset({
-    "GEOS: MSG IODC", "Spherical Mercator", "North Polar", "South Polar",
-})
-
-
-def available_projection_choices(show_extended=False):
-    """Return all projections published by the official EUMETView config."""
-    del show_extended
+def available_projection_choices():
+    """Return all projections published by the official EUMETSAT viewer config."""
     return tuple(PROJECTIONS)
 
 
@@ -474,12 +496,13 @@ LOADED_CONFIGURATION_FIELDS = (
     "WMS_URL", "WMS_VERSION", "IMAGE_TIME", "NETWORK_TIMEOUT_SECONDS",
     "SHOW_DOWNLOAD_SPEED", "DOWNLOAD_SPEED_UNIT", "SHOW_DOWNLOAD_PROGRESS",
     "SHOW_DOWNLOAD_PROGRESS_BAR", "KEEP_COMPLETED_DOWNLOAD_VISIBLE",
+    "DOWNLOAD_RETRIES", "CATALOGUE_RETRIES",
+    "PROFILE_LIST_VISIBLE_COLUMNS",
     "UPDATE_INTERVAL_MINUTES", "RUN_CONTINUOUSLY", "RENDER_MODE",
     "WIDTH", "HEIGHT", "ASPECT_RATIO", "BACKGROUND_COLOR", "RENDER_SCALE",
     "RENDER_SCALE_AUTOMATIC", "OUTPUT_ROOT_WINDOWS", "OUTPUT_ROOT_LINUX",
     "CUSTOM_LATEST_FOLDER", "CUSTOM_HISTORY_FOLDER", "PROJECTION",
     "VIEW_PRESET", "CUSTOM_BBOX", "VIEW_MODE", "ZOOM",
-    "SHOW_EXTENDED_PROJECTIONS",
     "TRUECOLOR_BLACK_NIGHT", "ENABLE_HISTORY", "HISTORY_RETENTION_MODE",
     "HISTORY_MAX_FILES", "HISTORY_RETENTION_YEARS",
     "HISTORY_RETENTION_MONTHS", "HISTORY_RETENTION_DAYS",
@@ -808,45 +831,6 @@ def calculate_file_sha256(file_path):
     return digest.hexdigest()
 
 
-def _migrate_legacy_image_directory(legacy, target):
-    """Move recognized image files from a pre-content default without overwriting."""
-    if not legacy.is_dir() or legacy.resolve() == target.resolve():
-        return 0
-    target.mkdir(parents=True, exist_ok=True)
-    moved = 0
-    for source in sorted(legacy.glob("*.png")):
-        if not source.is_file():
-            continue
-        destination = target / source.name
-        counter = 1
-        while destination.exists():
-            destination = target / f"{source.stem}_migrated_{counter}{source.suffix}"
-            counter += 1
-        shutil.move(str(source), str(destination))
-        moved += 1
-    try:
-        legacy.rmdir()
-    except OSError:
-        pass
-    return moved
-
-
-def migrate_legacy_content_directories():
-    """Move only old default image folders; configured custom paths stay untouched."""
-    moved = 0
-    if not CUSTOM_LATEST_FOLDER:
-        moved += _migrate_legacy_image_directory(
-            OUTPUT_ROOT / LATEST_DIRECTORY_NAME, LATEST_DIR
-        )
-    if not CUSTOM_HISTORY_FOLDER:
-        moved += _migrate_legacy_image_directory(
-            OUTPUT_ROOT / HISTORY_DIRECTORY_NAME, HISTORY_DIR
-        )
-    if moved:
-        log(f"Migrated {moved} existing image file(s) into {CONTENT_DIR}.")
-    return moved
-
-
 def get_profile_cache():
     return get_profile_image_cache(CONTENT_DIR)
 
@@ -896,7 +880,6 @@ def synchronize_profile_image_cache():
 
 
 def ensure_directories():
-    migrate_legacy_content_directories()
     LATEST_DIR.mkdir(parents=True, exist_ok=True)
     if ENABLE_HISTORY or not CUSTOM_HISTORY_FOLDER:
         HISTORY_DIR.mkdir(parents=True, exist_ok=True)
@@ -938,6 +921,22 @@ def normalize_download_speed_unit(value):
     if normalized not in aliases:
         raise ValueError("Download speed unit is invalid.")
     return aliases[normalized]
+
+
+def normalize_download_retries(value):
+    if type(value) is int and 1 <= value <= 9:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[1-9]", value.strip()):
+        return int(value.strip())
+    raise ValueError("Download retries must be a whole number from 1 to 9.")
+
+
+def normalize_catalogue_retries(value):
+    if type(value) is int and 1 <= value <= 9:
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[1-9]", value.strip()):
+        return int(value.strip())
+    raise ValueError("Catalogue retries must be a whole number from 1 to 9.")
 
 
 def format_download_speed(bytes_per_second, unit):
@@ -985,6 +984,11 @@ def format_download_progress(snapshot, show_speed=True, speed_unit="automatic",
     else:
         prefix = "Downloaded" if snapshot.get("successful") else "Download interrupted"
     return prefix + ": " + " · ".join(parts)
+
+
+def download_completion_text(snapshot):
+    return "Completed." if (snapshot.get("visible") and snapshot.get("successful")
+                            and not snapshot.get("active")) else ""
 
 
 def version_tuple(value):
@@ -1063,7 +1067,6 @@ def load_configuration(config_path):
     global OUTPUT_ROOT_WINDOWS, OUTPUT_ROOT_LINUX
     global CUSTOM_LATEST_FOLDER, CUSTOM_HISTORY_FOLDER
     global PROJECTION, VIEW_PRESET, CUSTOM_BBOX, VIEW_MODE, ZOOM
-    global SHOW_EXTENDED_PROJECTIONS
     global TRUECOLOR_BLACK_NIGHT
     global ENABLE_HISTORY, HISTORY_RETENTION_MODE, HISTORY_MAX_FILES
     global HISTORY_RETENTION_YEARS, HISTORY_RETENTION_MONTHS
@@ -1077,6 +1080,7 @@ def load_configuration(config_path):
     global DISPLAY_TIME_ZONE
     global SHOW_DOWNLOAD_SPEED, DOWNLOAD_SPEED_UNIT, SHOW_DOWNLOAD_PROGRESS
     global SHOW_DOWNLOAD_PROGRESS_BAR, KEEP_COMPLETED_DOWNLOAD_VISIBLE
+    global DOWNLOAD_RETRIES, CATALOGUE_RETRIES, PROFILE_LIST_VISIBLE_COLUMNS
 
     config_path = resolve_script_relative_path(config_path)
     ACTIVE_CONFIG_PATH = config_path
@@ -1084,16 +1088,7 @@ def load_configuration(config_path):
     if not config_path.exists():
         if config_path != DEFAULT_CONFIG_PATH:
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
-        legacy_config = next(
-            (SCRIPT_DIR / name for name in
-             ("earthscape_config.toml", "satscape_config.toml", "eumetview_config.toml")
-             if (SCRIPT_DIR / name).is_file()),
-            SCRIPT_DIR / "eumetview_config.toml",
-        )
-        if legacy_config.exists():
-            shutil.copyfile(legacy_config, config_path)
-            log(f"Migrated configuration to {config_path.name}")
-        elif DEFAULT_CONFIG_TEMPLATE_PATH.exists():
+        if DEFAULT_CONFIG_TEMPLATE_PATH.exists():
             shutil.copyfile(DEFAULT_CONFIG_TEMPLATE_PATH, config_path)
             log(f"Created configuration from template: {config_path.name}")
         else:
@@ -1103,9 +1098,8 @@ def load_configuration(config_path):
     with config_path.open("rb") as handle:
         config = tomllib.load(handle)
 
-    legacy_profile_library = read_library(config)
     if config_path.resolve() == DEFAULT_CONFIG_TEMPLATE_PATH.resolve():
-        IMAGE_PROFILE_LIBRARY = legacy_profile_library
+        IMAGE_PROFILE_LIBRARY = normalize_library({})
     else:
         with CONFIGURATION_FILE_LOCK:
             if ACTIVE_PROFILE_LIBRARY_PATH.exists():
@@ -1113,12 +1107,10 @@ def load_configuration(config_path):
                     ACTIVE_PROFILE_LIBRARY_PATH
                 )
             else:
+                IMAGE_PROFILE_LIBRARY = normalize_library({})
                 write_profile_library_file_unlocked(
-                    legacy_profile_library, ACTIVE_PROFILE_LIBRARY_PATH
+                    IMAGE_PROFILE_LIBRARY, ACTIVE_PROFILE_LIBRARY_PATH
                 )
-                IMAGE_PROFILE_LIBRARY = legacy_profile_library
-            if "image_profiles" in config:
-                update_active_configuration_unlocked(remove_library)
     DISPLAY_TIME_ZONE = normalize_time_zone(
         config.get("display", {}).get("time_zone", "system")
     )
@@ -1173,6 +1165,32 @@ def load_configuration(config_path):
     KEEP_COMPLETED_DOWNLOAD_VISIBLE = download.get(
         "keep_completed_visible", DEFAULT_KEEP_COMPLETED_DOWNLOAD_VISIBLE
     )
+    DOWNLOAD_RETRIES = normalize_download_retries(
+        download.get("retries", DEFAULT_DOWNLOAD_RETRIES)
+    )
+    CATALOGUE_RETRIES = normalize_catalogue_retries(
+        download.get("catalogue_retries", DEFAULT_CATALOGUE_RETRIES)
+    )
+
+    profile_list = config.get("profile_list", {})
+    if not isinstance(profile_list, dict):
+        raise ValueError("TOML 'profile_list' must be a table.")
+    configured_columns = profile_list.get(
+        "visible_columns", list(DEFAULT_PROFILE_LIST_COLUMNS)
+    )
+    if not isinstance(configured_columns, list):
+        raise ValueError("profile_list.visible_columns must be a list.")
+    if (
+        not configured_columns
+        or any(type(column) is not str for column in configured_columns)
+        or len(set(configured_columns)) != len(configured_columns)
+        or any(column not in DEFAULT_PROFILE_LIST_COLUMNS for column in configured_columns)
+    ):
+        raise ValueError("profile_list.visible_columns contains invalid columns.")
+    PROFILE_LIST_VISIBLE_COLUMNS = tuple(
+        column for column in DEFAULT_PROFILE_LIST_COLUMNS
+        if column in configured_columns
+    )
 
     output = config.get("output", {})
     CUSTOM_LATEST_FOLDER = str(output.get("latest_folder", "")).strip()
@@ -1199,11 +1217,6 @@ def load_configuration(config_path):
 
     view = config.get("view", {})
     PROJECTION = str(view.get("projection", PROJECTION))
-    # Preserve older configurations and backups; the new key takes precedence.
-    SHOW_EXTENDED_PROJECTIONS = bool(view.get(
-        "show_extended_projections",
-        view.get("unlock_experimental_projections", PROJECTION in EXTENDED_PROJECTIONS),
-    ))
     VIEW_PRESET = str(view.get("preset", VIEW_PRESET)).lower()
     configured_bbox = view.get("bbox", CUSTOM_BBOX)
     CUSTOM_BBOX = tuple(configured_bbox) if configured_bbox else None
@@ -1276,7 +1289,7 @@ def restore_loaded_configuration(state):
 # Only settings represented by the Image tab belong to an image profile.
 IMAGE_SETTING_FIELDS = {
     "view": {"projection": "PROJECTION", "preset": "VIEW_PRESET", "bbox": "CUSTOM_BBOX",
-             "fit_mode": "VIEW_MODE", "zoom": "ZOOM", "show_extended_projections": "SHOW_EXTENDED_PROJECTIONS",
+             "fit_mode": "VIEW_MODE", "zoom": "ZOOM",
              "truecolor_black_night": "TRUECOLOR_BLACK_NIGHT"},
     "output": {"width": "WIDTH", "height": "HEIGHT", "aspect_ratio": "ASPECT_RATIO",
                "background_color": "BACKGROUND_COLOR", "latest_folder": "CUSTOM_LATEST_FOLDER"},
@@ -1347,7 +1360,7 @@ def normalize_image_settings_snapshot(snapshot):
     for key in ("projection", "preset", "fit_mode"):
         if not isinstance(view[key], str) or not view[key].strip():
             raise ValueError(f"Image profile view.{key} must be nonempty text.")
-    for key in ("show_extended_projections", "truecolor_black_night"):
+    for key in ("truecolor_black_night",):
         if type(view[key]) is not bool:
             raise ValueError(f"Image profile view.{key} must be true or false.")
     if view["fit_mode"] not in {"fit", "crop"}:
@@ -2323,7 +2336,7 @@ _WMS_DURATION_PATTERN = re.compile(
 
 
 def parse_wms_duration(value):
-    """Parse the fixed ISO-8601 durations used by EUMETView time dimensions."""
+    """Parse the fixed ISO-8601 durations used by EUMETSAT time dimensions."""
     match = _WMS_DURATION_PATTERN.fullmatch(str(value).strip().upper())
     if not match:
         return None
@@ -2705,11 +2718,11 @@ def download_image(url, label=None):
     if not content_type.startswith("image/"):
         error_text = data.decode("utf-8", errors="replace")
         raise RuntimeError(
-            "EUMETView returned a non-image response:\n" + error_text[:4000]
+            "The EUMETSAT service returned a non-image response:\n" + error_text[:4000]
         )
 
     if not data:
-        raise RuntimeError("EUMETView returned an empty image response.")
+        raise RuntimeError("The EUMETSAT service returned an empty image response.")
 
     return data
 
@@ -2928,14 +2941,18 @@ def _latest_state_path():
 
 
 def _write_latest_state(path, configuration_signature, output_size,
-                        source_time=None):
+                        source_signature=None, source_time=None):
     if configuration_signature is None:
         return
     width, height = map(int, output_size)
     payload = {
-        "version": 1,
+        "version": 2,
         "file": path.name,
         "configuration_hash": signature_digest(configuration_signature),
+        "source_hash": (
+            signature_digest(source_signature)
+            if source_signature is not None else None
+        ),
         "image_hash": calculate_file_sha256(path),
         "width": width,
         "height": height,
@@ -2953,17 +2970,31 @@ def _write_latest_state(path, configuration_signature, output_size,
         temporary.unlink(missing_ok=True)
 
 
-def reusable_latest_image(configuration_signature, output_size):
-    """Return a verified matching normal image without contacting its provider."""
+def reusable_latest_image(configuration_signature, output_size,
+                          source_signature=None, source_time=None,
+                          allow_legacy_source_time=False):
+    """Return a verified normal image matching its settings and source frame."""
     state_path = _latest_state_path()
     try:
         if state_path.stat().st_size > 64_000:
             return None
         payload = json.loads(state_path.read_text(encoding="utf-8"))
-        if payload.get("version") != 1:
+        if payload.get("version") not in (1, 2):
             return None
         if payload.get("configuration_hash") != signature_digest(configuration_signature):
             return None
+        if source_signature is not None:
+            source_matches = (
+                payload.get("version") == 2
+                and payload.get("source_hash") == signature_digest(source_signature)
+            )
+            legacy_time_matches = (
+                allow_legacy_source_time and payload.get("version") == 1
+                and source_time is not None
+                and payload.get("source_time") == source_time
+            )
+            if not source_matches and not legacy_time_matches:
+                return None
         width, height = map(int, output_size)
         if (payload.get("width"), payload.get("height")) != (width, height):
             return None
@@ -2986,7 +3017,7 @@ def reusable_latest_image(configuration_signature, output_size):
 
 
 def save_latest_image(data, configuration_signature=None, output_size=None,
-                      source_time=None):
+                      source_signature=None, source_time=None):
     new_hash = calculate_sha256(data)
     existing_files = get_latest_image_files()
     current_path = existing_files[0] if existing_files else None
@@ -2996,7 +3027,8 @@ def save_latest_image(data, configuration_signature=None, output_size=None,
         if new_hash == old_hash:
             if output_size is not None:
                 _write_latest_state(
-                    current_path, configuration_signature, output_size, source_time
+                    current_path, configuration_signature, output_size,
+                    source_signature, source_time
                 )
             log("No image change detected. Latest file remains unchanged.")
             return None
@@ -3035,7 +3067,8 @@ def save_latest_image(data, configuration_signature=None, output_size=None,
     log(f"Final image size: {format_bytes(len(data))}")
     if output_size is not None:
         _write_latest_state(
-            latest_path, configuration_signature, output_size, source_time
+            latest_path, configuration_signature, output_size,
+            source_signature, source_time
         )
     return latest_path
 
@@ -3069,12 +3102,8 @@ def save_profile_image(profile_id, configuration_signature, source_signature,
 
 
 def get_history_files():
-    return list({
-        path
-        for prefix in (HISTORY_FILENAME_PREFIX, "earthscape", "satscape", "eumetview")
-        for path in HISTORY_DIR.glob(f"{prefix}_*.png")
-        if path.is_file()
-    })
+    return [path for path in HISTORY_DIR.glob(f"{HISTORY_FILENAME_PREFIX}_*.png")
+            if path.is_file()]
 
 
 def clear_history_images():
@@ -3437,13 +3466,16 @@ def get_worldview_client():
 
 
 def get_catalogue_client():
-    key = (NETWORK_TIMEOUT_SECONDS, USER_AGENT)
+    cache_path = (CONTENT_DIR / "catalogues.json").resolve()
+    key = (NETWORK_TIMEOUT_SECONDS, USER_AGENT, CATALOGUE_RETRIES, str(cache_path))
     with CATALOGUE_CLIENTS_LOCK:
         if key not in CATALOGUE_CLIENTS:
             CATALOGUE_CLIENTS.clear()
             CATALOGUE_CLIENTS[key] = CatalogueClient(
                 noaa=get_noaa_client(), himawari=get_himawari_client(),
                 slider=get_slider_client(), worldview=get_worldview_client(),
+                timeout=NETWORK_TIMEOUT_SECONDS, user_agent=USER_AGENT,
+                cache_path=cache_path, retries=CATALOGUE_RETRIES,
             )
         return CATALOGUE_CLIENTS[key]
 
@@ -3460,20 +3492,39 @@ def get_copernicus_client():
                 COPERNICUS_CLIENT_SECRET,
                 timeout=NETWORK_TIMEOUT_SECONDS,
                 user_agent=USER_AGENT,
+                network_attempts=1,
             )
         return COPERNICUS_CLIENTS[key]
 
 
 def warm_public_catalogues():
-    """Prime shared metadata once per application start, without delaying images."""
+    """Refresh shared metadata once per application start, without delaying images."""
     client = get_catalogue_client()
     def worker():
         try:
-            result = client.refresh_all_catalogues(refresh=False)
+            result = client.refresh_all_catalogues(refresh=True)
             if result.get("errors"):
                 log("Catalogue refresh: " + "; ".join(result["errors"]))
         except Exception as exc:
             log(f"Catalogue refresh warning: {exc}")
+        if COPERNICUS_CLIENT_ID and COPERNICUS_CLIENT_SECRET:
+            problem = None
+            for _attempt in range(CATALOGUE_RETRIES + 1):
+                try:
+                    profile = SOURCE_PROFILES["copernicus"]
+                    output_size = get_output_dimensions()
+                    dates = get_copernicus_client().list_dates(profile, output_size)
+                    client.store_copernicus_dates(profile, output_size, dates)
+                    problem = None
+                    break
+                except Exception as exc:
+                    problem = exc
+            if problem is not None:
+                cached = client.cached_copernicus_dates(
+                    SOURCE_PROFILES["copernicus"], get_output_dimensions()
+                )
+                suffix = " Cached catalogue data remains available." if cached is not None else ""
+                log(f"Copernicus catalogue refresh warning: {problem}.{suffix}")
     threading.Thread(target=worker, name="MarbleScape-catalogue-startup", daemon=True).start()
 
 
@@ -3597,6 +3648,7 @@ def copernicus_frame_signature(frame):
         profile["product"], profile["layer"], profile["date"],
         profile["latitude"], profile["longitude"], profile["map_zoom"],
         profile["map_labels"], profile["coverage_mode"], profile["lookback_days"],
+        profile["max_cloud_cover"],
         frame["timestamp"],
     )
 
@@ -3825,7 +3877,7 @@ def print_configuration(
         )
     if output_width > MAX_WMS_DIMENSION or output_height > MAX_WMS_DIMENSION:
         log(
-            "Warning: EUMETView may reject dimensions above approximately "
+            "Warning: EUMETSAT may reject dimensions above approximately "
             f"{MAX_WMS_DIMENSION} pixels because of its rendering memory limit."
         )
     log(f"BBOX: {bbox}")
@@ -3968,6 +4020,7 @@ def _perform_update(
             data,
             configuration_signature=cache_configuration_signature,
             output_size=(output_width, output_height),
+            source_signature=cache_source_signature,
             source_time=cache_source_time,
         )
         current_path = installed_path
@@ -4003,6 +4056,48 @@ def expected_download_request_count(render_mode, requests):
     return None
 
 
+class DownloadRetriesExhausted(RuntimeError):
+    """A transient image-transfer failure used all configured attempts."""
+
+
+def is_retryable_download_error(exc):
+    """Retry transient transport failures, never invalid requests or bad certificates."""
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, ssl.SSLCertVerificationError):
+            return False
+        if isinstance(exc, HTTPError):
+            return exc.code in {408, 425, 429, 500, 502, 503, 504}
+        if isinstance(exc, URLError):
+            reason = getattr(exc, "reason", None)
+            return not (isinstance(reason, ssl.SSLCertVerificationError)
+                        or "certificate verify failed" in str(reason).casefold())
+        if isinstance(exc, (TimeoutError, ConnectionError, http.client.IncompleteRead,
+                            http.client.RemoteDisconnected)):
+            return True
+        if isinstance(exc, OSError) and getattr(exc, "winerror", None) in {
+            10051, 10052, 10053, 10054, 10060, 10061,
+        }:
+            return True
+        exc = exc.__cause__
+    return False
+
+
+def wait_before_download_retry(seconds):
+    deadline = time.monotonic() + seconds
+    while True:
+        DOWNLOAD_PROGRESS.raise_if_cancelled()
+        if APPLICATION_STOP_EVENT.is_set() or CONFIGURATION_RELOAD_EVENT.is_set():
+            raise RuntimeError(
+                "Download retry stopped because the application is stopping or settings changed."
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        DOWNLOAD_PROGRESS.wait_or_raise(min(0.25, remaining))
+
+
 def perform_update(
     render_mode,
     requests,
@@ -4016,28 +4111,52 @@ def perform_update(
     cache_source_time=None,
 ):
     """Track network transfer progress while rendering and installing an image."""
-    DOWNLOAD_PROGRESS.begin(expected_download_request_count(render_mode, requests))
-    try:
-        result = _perform_update(
-            render_mode,
-            requests,
-            render_width,
-            render_height,
-            output_width,
-            output_height,
-            cache_profile_id=cache_profile_id,
-            cache_configuration_signature=cache_configuration_signature,
-            cache_source_signature=cache_source_signature,
-            cache_source_time=cache_source_time,
-        )
-    except DownloadCancelledError:
-        DOWNLOAD_PROGRESS.finish(False, cancelled=True)
-        raise
-    except BaseException:
-        DOWNLOAD_PROGRESS.finish(False)
-        raise
-    DOWNLOAD_PROGRESS.finish(True)
-    return result
+    expected_requests = expected_download_request_count(render_mode, requests)
+    DOWNLOAD_PROGRESS.begin(expected_requests)
+    max_attempts = normalize_download_retries(DOWNLOAD_RETRIES) + 1
+    for attempt in range(max_attempts):
+        try:
+            result = _perform_update(
+                render_mode,
+                requests,
+                render_width,
+                render_height,
+                output_width,
+                output_height,
+                cache_profile_id=cache_profile_id,
+                cache_configuration_signature=cache_configuration_signature,
+                cache_source_signature=cache_source_signature,
+                cache_source_time=cache_source_time,
+            )
+        except DownloadCancelledError:
+            DOWNLOAD_PROGRESS.finish(False, cancelled=True)
+            raise
+        except Exception as exc:
+            if (not DOWNLOAD_PROGRESS.snapshot()["cancellable"]
+                    or not is_retryable_download_error(exc)):
+                DOWNLOAD_PROGRESS.finish(False)
+                raise
+            if attempt + 1 >= max_attempts:
+                DOWNLOAD_PROGRESS.finish(False)
+                raise DownloadRetriesExhausted(
+                    f"Image download failed after {max_attempts} attempts: {exc}"
+                ) from exc
+            log(f"Image transfer attempt {attempt + 1}/{max_attempts} failed; retrying: {exc}")
+            try:
+                wait_before_download_retry(min(10.0, 0.5 * (2 ** attempt)))
+                DOWNLOAD_PROGRESS.restart_attempt(expected_requests)
+            except DownloadCancelledError:
+                DOWNLOAD_PROGRESS.finish(False, cancelled=True)
+                raise
+            except BaseException:
+                DOWNLOAD_PROGRESS.finish(False)
+                raise
+        except BaseException:
+            DOWNLOAD_PROGRESS.finish(False)
+            raise
+        else:
+            DOWNLOAD_PROGRESS.finish(True)
+            return result
 
 
 def report_update_status(status_callback, state, next_check=None):
@@ -4233,6 +4352,7 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
     if not diagnostic:
         synchronize_profile_image_cache()
     rotation = RotationScheduler(IMAGE_PROFILE_LIBRARY if RUN_CONTINUOUSLY and not diagnostic else {})
+    rotation.set_max_attempts(DOWNLOAD_RETRIES + 1)
     rotating_at_start = rotation.due()
     pending_profile = None
     profile_previous = None
@@ -4375,6 +4495,7 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
             try:
                 load_configuration(args.config)
                 validate_configuration()
+                rotation.set_max_attempts(DOWNLOAD_RETRIES + 1)
                 synchronize_profile_image_cache()
                 image_changed = image_configuration_key(previous_configuration) != image_configuration_key(capture_loaded_configuration())
                 rotation_changed = rotation.configure(IMAGE_PROFILE_LIBRARY if RUN_CONTINUOUSLY else {})
@@ -4415,6 +4536,7 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
                         IMAGE_STATUS["error"] = ""
             except Exception as exc:
                 restore_loaded_configuration(previous_configuration)
+                rotation.set_max_attempts(DOWNLOAD_RETRIES + 1)
                 log(f"Unable to apply configuration: {exc}")
 
         cycle_started = time.monotonic()
@@ -4463,7 +4585,10 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
 
         try:
             if pending_profile is not None:
-                set_rotation_status(f"Loading {pending_profile['name']} (attempt {rotation.attempts + 1}/3)...")
+                set_rotation_status(
+                    f"Loading {pending_profile['name']} "
+                    f"(attempt {rotation.attempts + 1}/{rotation.max_attempts})..."
+                )
                 apply_image_settings(pending_profile["settings"])
                 needs_plan = True
 
@@ -4660,6 +4785,42 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
                 None if frozen_path is not None else
                 profile_cache_source_time(render_mode, requests, pending_signature)
             )
+            cached_latest_path = None
+            if (
+                cache_profile_id is None and frozen_path is None
+                and should_download and not force_download
+            ):
+                try:
+                    cached_latest_path = reusable_latest_image(
+                        cache_configuration_signature,
+                        (output_width, output_height),
+                        source_signature=pending_signature,
+                        source_time=cache_source_time,
+                        allow_legacy_source_time=render_mode in {
+                            "noaa", "himawari", "slider", "copernicus", "worldview"
+                        },
+                    )
+                except Exception as exc:
+                    log(f"Latest image lookup warning: {exc}")
+                if cached_latest_path is not None:
+                    try:
+                        _write_latest_state(
+                            cached_latest_path,
+                            cache_configuration_signature,
+                            (output_width, output_height),
+                            pending_signature,
+                            cache_source_time,
+                        )
+                    except Exception as exc:
+                        log(f"Latest image state update warning: {exc}")
+                    should_download = False
+                    time_signature = pending_signature
+                    first_cycle = False
+                    record_source_frame_status(render_mode, requests)
+                    log(
+                        "No newer source image is available; reusing the "
+                        f"verified latest image: {cached_latest_path}"
+                    )
             if cache_profile_id is not None and frozen_path is None:
                 if not force_download:
                     try:
@@ -4702,6 +4863,10 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
             elif cached_profile_path is not None:
                 installed_path = None
                 current_path = cached_profile_path
+                downloaded_size = 0
+            elif cached_latest_path is not None:
+                installed_path = None
+                current_path = cached_latest_path
                 downloaded_size = 0
             else:
                 installed_path = None
@@ -4788,10 +4953,14 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
             if args.once:
                 raise
             if pending_profile is not None and not CONFIGURATION_RELOAD_EVENT.is_set() and not APPLICATION_STOP_EVENT.is_set():
-                result = rotation.failure()
+                result = (rotation.failure(exhausted=True)
+                          if isinstance(exc, DownloadRetriesExhausted)
+                          else rotation.failure())
                 name = pending_profile["name"]
                 if result == "retry":
-                    set_rotation_status(f"{name}: attempt {rotation.attempts}/3 failed; retrying...")
+                    set_rotation_status(
+                        f"{name}: attempt {rotation.attempts}/{rotation.max_attempts} failed; retrying..."
+                    )
                 else:
                     try:
                         apply_image_settings(profile_previous)
@@ -4807,8 +4976,10 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
                     profile_previous_image = None
                     needs_plan = True
                     set_rotation_status(
-                        "All profiles failed three times; waiting for the next rotation interval."
-                        if result == "wait" else f"Skipped {name} after three failed attempts.",
+                        f"All profiles failed after {rotation.max_attempts} attempts each; "
+                        "waiting for the next rotation interval."
+                        if result == "wait" else
+                        f"Skipped {name} after {rotation.max_attempts} failed attempts.",
                         rotation.deadline)
 
         if not RUN_CONTINUOUSLY:
@@ -5007,6 +5178,14 @@ def ensure_download_configuration_section(text):
     return text.rstrip() + newline * 2 + "[download]" + newline
 
 
+def ensure_profile_list_configuration_section(text):
+    """Add the profile-list table when saving an older configuration."""
+    if re.search(r"(?m)^\s*\[profile_list\]\s*(?:#[^\r\n]*)?$", text):
+        return text
+    newline = "\r\n" if "\r\n" in text else "\n"
+    return text.rstrip() + newline * 2 + "[profile_list]" + newline
+
+
 def source_configuration_updates(provider, profiles, check_for_updates=None):
     provider, profiles = normalize_source_configuration(provider, profiles)
     updates = [("source", "provider", provider)]
@@ -5139,6 +5318,12 @@ def normalize_settings_form_values(values, provider=None):
     retention_mode = str(values["retention_mode"]).strip().lower()
     display_time_zone = normalize_time_zone(values["time_zone"])
     download_speed_unit = normalize_download_speed_unit(values["download_speed_unit"])
+    download_retries = normalize_download_retries(
+        values.get("download_retries", DOWNLOAD_RETRIES)
+    )
+    catalogue_retries = normalize_catalogue_retries(
+        values.get("catalogue_retries", CATALOGUE_RETRIES)
+    )
 
     if position not in WINDOWS_WALLPAPER_POSITIONS:
         raise ValueError("Wallpaper position is invalid.")
@@ -5150,11 +5335,8 @@ def normalize_settings_form_values(values, provider=None):
     # are implemented. Persist the effective projection shown in the UI.
     if is_wms:
         projection_name = VIEW_PRESETS[view_preset]["projection"] or projection_name
-    show_extended = bool(values.get(
-        "show_extended_projections", SHOW_EXTENDED_PROJECTIONS
-    ))
-    if is_wms and projection_name not in available_projection_choices(show_extended):
-        raise ValueError("Enable Show extended projections before selecting this projection.")
+    if is_wms and projection_name not in available_projection_choices():
+        raise ValueError("Projection is invalid.")
     if fit_mode not in {"fit", "crop"}:
         raise ValueError("Fit mode must be 'fit' or 'crop'.")
     if retention_mode not in {"count", "time", "both"}:
@@ -5193,7 +5375,6 @@ def normalize_settings_form_values(values, provider=None):
         ("display", "time_zone", display_time_zone),
         ("view", "preset", view_preset),
         ("view", "projection", projection_name),
-        ("view", "show_extended_projections", show_extended),
         ("view", "fit_mode", fit_mode),
         ("view", "zoom", zoom),
         (
@@ -5210,6 +5391,8 @@ def normalize_settings_form_values(values, provider=None):
         ("service", "update_interval_minutes", update_interval),
         ("download", "show_speed", bool(values["show_download_speed"])),
         ("download", "speed_unit", download_speed_unit),
+        ("download", "retries", download_retries),
+        ("download", "catalogue_retries", catalogue_retries),
         ("download", "show_progress", bool(values["show_download_progress"])),
         ("download", "show_progress_bar", bool(values["show_download_progress_bar"])),
         (
@@ -5228,7 +5411,7 @@ def normalize_settings_form_values(values, provider=None):
     )
     if (provider or IMAGE_SOURCE) != "eumetsat":
         # Hidden WMS controls must never overwrite a retained EUMETSAT selection.
-        wms_fields = {"preset", "projection", "show_extended_projections", "truecolor_black_night"}
+        wms_fields = {"preset", "projection", "truecolor_black_night"}
         updates = tuple(item for item in updates
                         if not (item[0] == "view" and item[1] in wms_fields)
                         and not (item[0] == "output" and item[1] == "render_scale"))
@@ -5316,7 +5499,7 @@ def read_profile_library_file(path=None):
         raise ValueError(
             "profiles.toml must contain exactly one [image_profiles] document."
         )
-    return read_library(parsed)
+    return normalize_library(parsed["image_profiles"])
 
 
 def write_profile_library_file_unlocked(library, path=None):
@@ -5354,7 +5537,7 @@ def update_active_configuration_and_profiles(transform, library):
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
         with config_path.open("r", encoding="utf-8", newline="") as handle:
             original_config = handle.read()
-        updated_config = remove_library(transform(original_config))
+        updated_config = transform(original_config)
         tomllib.loads(updated_config)
         updated_profiles = serialize_library(library)
         original_profile_bytes = (
@@ -5431,7 +5614,6 @@ def create_settings_backup_payload():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
         with config_path.open("r", encoding="utf-8", newline="") as handle:
             config_text = handle.read()
-        config_text = remove_library(config_text)
         parsed_settings = tomllib.loads(config_text)
         if ACTIVE_PROFILE_LIBRARY_PATH.exists():
             profile_library = read_profile_library_file()
@@ -5465,13 +5647,10 @@ def parse_settings_backup_payload(payload):
     """Validate a JSON settings backup and return its restorable values."""
     if not isinstance(payload, dict):
         raise ValueError("The backup root must be a JSON object.")
-    if payload.get("format") not in {
-        SETTINGS_BACKUP_FORMAT, "earthscape-settings-backup",
-        "satscape-settings-backup", "eumetview-settings-backup"
-    }:
+    if payload.get("format") != SETTINGS_BACKUP_FORMAT:
         raise ValueError("This is not a MarbleScape settings backup.")
     version = payload.get("version")
-    if version not in {1, SETTINGS_BACKUP_VERSION}:
+    if version != SETTINGS_BACKUP_VERSION:
         raise ValueError(
             f"Unsupported backup version: {version!r}."
         )
@@ -5501,40 +5680,37 @@ def parse_settings_backup_payload(payload):
             "The readable settings snapshot does not match the configuration."
         )
 
-    if version == 1:
-        profile_library = read_library(parsed_settings)
-    else:
-        profiles_text = payload.get("profiles_toml")
-        if not isinstance(profiles_text, str) or not profiles_text.strip():
-            raise ValueError("The backup contains no profiles.toml document.")
-        if len(profiles_text.encode("utf-8")) > MAX_BACKUP_CONFIGURATION_BYTES:
-            raise ValueError("The profile library stored in the backup is too large.")
-        expected_profiles_digest = payload.get("profiles_sha256")
-        actual_profiles_digest = hashlib.sha256(
-            profiles_text.encode("utf-8")
-        ).hexdigest()
-        if (
-            not isinstance(expected_profiles_digest, str)
-            or expected_profiles_digest.lower() != actual_profiles_digest
-        ):
-            raise ValueError("The backup profile-library checksum is invalid.")
-        try:
-            parsed_profiles = tomllib.loads(profiles_text)
-        except tomllib.TOMLDecodeError as exc:
-            raise ValueError(f"The backup contains invalid profile TOML: {exc}") from exc
-        if set(parsed_profiles) != {"image_profiles"}:
-            raise ValueError("The backup profile document is invalid.")
-        profile_library = read_library(parsed_profiles)
-        if payload.get("profiles") != make_json_compatible(profile_library):
-            raise ValueError(
-                "The readable profile snapshot does not match profiles.toml."
-            )
+    profiles_text = payload.get("profiles_toml")
+    if not isinstance(profiles_text, str) or not profiles_text.strip():
+        raise ValueError("The backup contains no profiles.toml document.")
+    if len(profiles_text.encode("utf-8")) > MAX_BACKUP_CONFIGURATION_BYTES:
+        raise ValueError("The profile library stored in the backup is too large.")
+    expected_profiles_digest = payload.get("profiles_sha256")
+    actual_profiles_digest = hashlib.sha256(
+        profiles_text.encode("utf-8")
+    ).hexdigest()
+    if (
+        not isinstance(expected_profiles_digest, str)
+        or expected_profiles_digest.lower() != actual_profiles_digest
+    ):
+        raise ValueError("The backup profile-library checksum is invalid.")
+    try:
+        parsed_profiles = tomllib.loads(profiles_text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"The backup contains invalid profile TOML: {exc}") from exc
+    if set(parsed_profiles) != {"image_profiles"}:
+        raise ValueError("The backup profile document is invalid.")
+    profile_library = normalize_library(parsed_profiles["image_profiles"])
+    if payload.get("profiles") != make_json_compatible(profile_library):
+        raise ValueError(
+            "The readable profile snapshot does not match profiles.toml."
+        )
 
     startup_enabled = payload.get("windows_startup_enabled")
     if not isinstance(startup_enabled, bool):
         raise ValueError("The backup contains an invalid Windows startup setting.")
 
-    return remove_library(config_text), profile_library, startup_enabled
+    return config_text, profile_library, startup_enabled
 
 
 def export_settings_backup(output_path):
@@ -5728,50 +5904,6 @@ def is_windows_startup_enabled():
     return _windows_startup_matches_current(capture_windows_startup_state())
 
 
-def migrate_legacy_windows_startup():
-    """Migrate owned legacy launches without overwriting another registration."""
-    if os.name != "nt":
-        return
-    import winreg
-    legacy_files = {"eumetview.exe", "eumetview_download.py", "satscape.exe",
-                    "satscape_download.py", "earthscape.exe", "earthscape_download.py"}
-    folder = os.path.normcase(str(SCRIPT_DIR.resolve()))
-    active_config = os.path.normcase(str(resolve_script_relative_path(ACTIVE_CONFIG_PATH)))
-    for legacy_name in ("EarthScape", "SatScape", "EUMETView"):
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, WINDOWS_RUN_KEY,
-                                access=winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
-                legacy_state = winreg.QueryValueEx(key, legacy_name)
-                identity = _windows_startup_identity(legacy_state)
-                if identity is None:
-                    continue
-                target = Path(identity[0])
-                if (os.path.normcase(str(target.parent)) != folder or
-                        target.name.casefold() not in legacy_files or identity[1] != active_config):
-                    continue
-                previous = capture_windows_startup_state()
-                if previous is not None and not _windows_startup_matches_current(previous):
-                    continue
-                try:
-                    if previous is None:
-                        restore_windows_startup_state((get_windows_startup_command(), winreg.REG_SZ))
-                    winreg.DeleteValue(key, legacy_name)
-                except OSError as error:
-                    try:
-                        winreg.SetValueEx(key, legacy_name, 0, legacy_state[1], legacy_state[0])
-                        restore_windows_startup_state(previous)
-                    except OSError as rollback_error:
-                        raise RuntimeError(
-                            f"{error} Windows startup migration rollback also failed: {rollback_error}"
-                        ) from error
-                    raise
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError, RuntimeError) as exc:
-            # Autostart maintenance must not prevent an ordinary app launch.
-            log(f"Windows startup migration warning: {exc}")
-
-
 def set_windows_startup_enabled(enabled):
     if os.name != "nt":
         return
@@ -5849,7 +5981,6 @@ def run_with_windows_tray(argv=None):
     try:
         tray_args = parse_arguments(argv)
         load_configuration(tray_args.config)
-        migrate_legacy_windows_startup()
     except Exception as exc:
         log(f"Fatal error: {exc}")
         try:
@@ -5876,6 +6007,19 @@ def run_with_windows_tray(argv=None):
         "state": "starting",
         "next_check": None,
     }
+
+    def create_tray_dialog_root(tk):
+        """Close each Tk window on its own GUI thread when the tray exits."""
+        root = tk.Tk()
+
+        def close_when_stopping():
+            if APPLICATION_STOP_EVENT.is_set():
+                root.destroy()
+            else:
+                root.after(100, close_when_stopping)
+
+        root.after(100, close_when_stopping)
+        return root
 
     def get_tray_status_snapshot():
         with tray_status_lock:
@@ -5963,7 +6107,7 @@ def run_with_windows_tray(argv=None):
         from tkinter import messagebox, ttk
         from PIL import Image, ImageDraw, ImageTk
 
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.title("Support this project")
         root.resizable(False, False)
@@ -6268,7 +6412,7 @@ def run_with_windows_tray(argv=None):
         from tkinter import colorchooser, filedialog, messagebox, ttk
         from marblescape_source_settings import SourceSettings
 
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.withdraw()
         root.title("MarbleScape settings")
@@ -6379,9 +6523,6 @@ def run_with_windows_tray(argv=None):
             ),
             "view_preset": tk.StringVar(value=current_preset_label),
             "projection": tk.StringVar(value=get_active_view()[0]),
-            "show_extended_projections": tk.BooleanVar(
-                value=SHOW_EXTENDED_PROJECTIONS
-            ),
             "satellite_layer": tk.StringVar(value=current_layer_label),
             "fit_mode": tk.StringVar(value=VIEW_MODE),
             "zoom": tk.StringVar(value=number_text(ZOOM)),
@@ -6417,6 +6558,8 @@ def run_with_windows_tray(argv=None):
             "download_speed_unit": tk.StringVar(
                 value="Automatic" if DOWNLOAD_SPEED_UNIT == "automatic" else DOWNLOAD_SPEED_UNIT
             ),
+            "download_retries": tk.StringVar(value=str(DOWNLOAD_RETRIES)),
+            "catalogue_retries": tk.StringVar(value=str(CATALOGUE_RETRIES)),
             "show_download_progress": tk.BooleanVar(value=SHOW_DOWNLOAD_PROGRESS),
             "show_download_progress_bar": tk.BooleanVar(value=SHOW_DOWNLOAD_PROGRESS_BAR),
             "keep_completed_download_visible": tk.BooleanVar(
@@ -6497,9 +6640,10 @@ def run_with_windows_tray(argv=None):
         image_tab = add_settings_tab("Image")
         download_tab = add_settings_tab("Download")
         profiles_tab = add_settings_tab("Profiles & Rotation")
-        history_tab = add_settings_tab("History & Storage")
+        history_tab = add_settings_tab("Storage & History")
         backup_tab = add_settings_tab("Backup")
         sources_tab = add_settings_tab("Sources")
+        info_tab = add_settings_tab("Info")
         about_tab = add_settings_tab("About")
 
         def scroll_settings(event):
@@ -6581,7 +6725,7 @@ def run_with_windows_tray(argv=None):
             combo.grid(row=row, column=1, pady=3, sticky="ew")
             return combo
 
-        def add_folder_picker(parent, row, label, key, default_folder):
+        def add_folder_picker(parent, row, label, key, default_folder, open_label):
             ttk.Label(parent, text=label).grid(
                 row=row, column=0, padx=(0, 10), pady=3, sticky="w"
             )
@@ -6611,6 +6755,24 @@ def run_with_windows_tray(argv=None):
 
             ttk.Button(field, text="Choose...", command=choose_folder).grid(
                 row=0, column=1
+            )
+
+            def open_folder():
+                try:
+                    configured = variables[key].get().strip()
+                    folder = (
+                        resolve_script_relative_path(configured)
+                        if configured else default_folder
+                    )
+                    folder.mkdir(parents=True, exist_ok=True)
+                    os.startfile(str(folder.resolve()))
+                except Exception as exc:
+                    messagebox.showerror(
+                        f"Unable to open {label.lower()}", str(exc), parent=root
+                    )
+
+            ttk.Button(field, text=open_label, command=open_folder).grid(
+                row=1, column=1, pady=(4, 0), sticky="e"
             )
             ttk.Label(
                 parent, text="Empty = default; relative paths use the script folder."
@@ -6851,9 +7013,7 @@ def run_with_windows_tray(argv=None):
             variables["fit_mode"].set(updates["fit_mode"])
 
         def refresh_projection_choices():
-            choices = available_projection_choices(
-                variables["show_extended_projections"].get()
-            )
+            choices = available_projection_choices()
             projection_combo.configure(values=choices)
             if variables["projection"].get() not in choices:
                 variables["projection"].set("GEOS: MSG FES, MTG FD")
@@ -6915,55 +7075,8 @@ def run_with_windows_tray(argv=None):
             "Provider and cache timestamps remain stored in UTC."
         )).grid(row=1, column=0, columnspan=2, pady=(4, 0), sticky="w")
 
-        view_frame = ttk.LabelFrame(image_tab, text="View", padding=8)
-        view_frame.grid(row=3, column=0, pady=(0, 8), sticky="ew")
-        satellite_combo = add_combo(
-            view_frame,
-            0,
-            "Satellite layer",
-            variables["satellite_layer"],
-            tuple(layer_label_to_value),
-            width=30,
-        )
-        legacy_wms_layer_controls = [
-            widget for widget in view_frame.winfo_children()
-            if int(widget.grid_info().get("row", -1)) == 0
-        ]
-        for widget in legacy_wms_layer_controls:
-            widget.grid_remove()
-        projection_combo = add_combo(
-            view_frame, 1, "Projection", variables["projection"],
-            available_projection_choices(SHOW_EXTENDED_PROJECTIONS), width=30,
-        )
-        projection_combo.bind("<<ComboboxSelected>>", select_projection)
-        add_combo(view_frame, 2, "Fit mode", variables["fit_mode"], ("fit", "crop"))
-        add_entry(view_frame, 3, "Zoom", variables["zoom"])
-        ttk.Checkbutton(
-            view_frame,
-            text="Black TrueColor night side",
-            variable=variables["truecolor_black_night"],
-        ).grid(row=4, column=0, columnspan=2, pady=3, sticky="w")
-        projection_note = ttk.Label(
-            view_frame,
-            text="All projections published by EUMETView are available.",
-        )
-        projection_note.grid(row=5, column=0, columnspan=2, pady=3, sticky="w")
-        ttk.Label(
-            view_frame,
-            text="Coverage depends on the selected satellite layer.",
-        ).grid(row=6, column=0, columnspan=2, pady=3, sticky="w")
-        ttk.Label(
-            view_frame,
-            text="Changing projection resets the view to Full Earth.\n"
-                 "Regional presets use Geographic.",
-        ).grid(row=7, column=0, columnspan=2, pady=3, sticky="w")
-        ttk.Label(view_frame, wraplength=640, text=(
-            "Fit keeps the whole view; Crop fills the output and trims the edges. "
-            "General > Wallpaper > Position then places the finished file on the desktop."
-        )).grid(row=8, column=0, columnspan=2, pady=3, sticky="w")
-
         output_frame = ttk.LabelFrame(image_tab, text="Output", padding=8)
-        output_frame.grid(row=4, column=0, pady=(0, 8), sticky="ew")
+        output_frame.grid(row=3, column=0, pady=(0, 8), sticky="ew")
         resolution_combo = add_combo(
             output_frame,
             0,
@@ -7026,10 +7139,6 @@ def run_with_windows_tray(argv=None):
         ).grid(row=0, column=1)
         for key in ("width", "height", "aspect_ratio"):
             variables[key].trace_add("write", refresh_output_preset_labels)
-        add_folder_picker(
-            output_frame, 8, "Custom latest folder", "latest_folder",
-            CONTENT_DIR / LATEST_DIRECTORY_NAME,
-        )
         variables["render_scale"].trace_add(
             "write",
             refresh_render_quality_preset,
@@ -7039,37 +7148,30 @@ def run_with_windows_tray(argv=None):
             "Largest available uses the most detailed source image; resizing uses "
             "high-quality Lanczos filtering. A WMS render factor adds no source detail."
         ))
-        noaa_quality_hint.grid(row=10, column=0, columnspan=2, pady=3, sticky="w")
+        noaa_quality_hint.grid(row=8, column=0, columnspan=2, pady=3, sticky="w")
 
         copernicus_hidden_output_controls = [
             widget for widget in output_frame.winfo_children()
             if int(widget.grid_info().get("row", -1)) == 7
         ]
 
-        wms_controls = [widget for widget in view_frame.winfo_children()
-                        if int(widget.grid_info().get("row", -1)) not in {0, 2, 3, 8}]
-        wms_controls += [widget for widget in output_frame.winfo_children()
-                         if int(widget.grid_info().get("row", -1)) in {5, 6}]
+        wms_output_controls = [widget for widget in output_frame.winfo_children()
+                               if int(widget.grid_info().get("row", -1)) in {5, 6}]
 
         def source_changed(provider):
-            for widget in wms_controls:
+            for widget in wms_output_controls:
                 if provider == "eumetsat":
                     widget.grid()
                 else:
                     widget.grid_remove()
-            for widget in legacy_wms_layer_controls:
-                widget.grid_remove()
+            if source_settings.view_defaults_requested:
+                variables["zoom"].set("1.1" if provider == "eumetsat" else "1")
             if provider == "copernicus":
-                view_frame.grid_remove()
                 for widget in copernicus_hidden_output_controls:
                     widget.grid_remove()
             else:
-                view_frame.grid()
                 for widget in copernicus_hidden_output_controls:
                     widget.grid()
-                view_frame.configure(
-                    text="View" if provider == "eumetsat" else "Image placement"
-                )
             if provider == "eumetsat":
                 noaa_quality_hint.grid_remove()
             elif provider in {"goes_east", "goes_west", "solar", "himawari", "slider"}:
@@ -7111,13 +7213,51 @@ def run_with_windows_tray(argv=None):
             eumetsat_layer=selected_wms_layer,
         )
         source_settings.frame.grid(row=0, column=0, pady=(0, 8), sticky="ew")
+        generic_view_frame = source_settings.generic_view_frame
+        add_combo(
+            generic_view_frame, 0, "Fit mode", variables["fit_mode"], ("fit", "crop")
+        )
+        add_entry(generic_view_frame, 1, "Zoom", variables["zoom"])
+        ttk.Label(generic_view_frame, wraplength=640, text=(
+            "Fit keeps the whole view; Crop fills the output and trims the edges. "
+            "General > Wallpaper > Position then places the finished file on the desktop."
+        )).grid(row=2, column=0, columnspan=2, pady=(3, 0), sticky="w")
         preset_frame = source_settings.eumetsat_view_frame
-        preset_combo = add_combo(preset_frame, 0, "Preset", variables["view_preset"],
+        projection_combo = add_combo(
+            preset_frame, 0, "Projection", variables["projection"],
+            available_projection_choices(), width=30,
+        )
+        projection_combo.bind("<<ComboboxSelected>>", select_projection)
+        add_combo(preset_frame, 1, "Fit mode", variables["fit_mode"], ("fit", "crop"))
+        add_entry(preset_frame, 2, "Zoom", variables["zoom"])
+        preset_combo = add_combo(preset_frame, 3, "Preset", variables["view_preset"],
                                  tuple(preset_label_to_value), width=38)
         preset_combo.bind("<<ComboboxSelected>>", select_view_preset)
+        ttk.Checkbutton(
+            preset_frame,
+            text="Black TrueColor night side",
+            variable=variables["truecolor_black_night"],
+        ).grid(row=4, column=0, columnspan=2, pady=3, sticky="w")
         ttk.Label(preset_frame, wraplength=640, text=(
             "Selecting a preset sets its satellite layer, projection, fit mode, and zoom."
-        )).grid(row=1, column=0, columnspan=2, pady=(3, 0), sticky="w")
+        )).grid(row=5, column=0, columnspan=2, pady=(3, 0), sticky="w")
+        ttk.Label(
+            preset_frame,
+            text="All projections published by the EUMETSAT viewer are available.",
+        ).grid(row=6, column=0, columnspan=2, pady=3, sticky="w")
+        ttk.Label(
+            preset_frame,
+            text="Coverage depends on the selected satellite layer.",
+        ).grid(row=7, column=0, columnspan=2, pady=3, sticky="w")
+        ttk.Label(
+            preset_frame,
+            text="Changing projection resets the view to Full Earth.\n"
+                 "Regional presets use Geographic.",
+        ).grid(row=8, column=0, columnspan=2, pady=3, sticky="w")
+        ttk.Label(preset_frame, wraplength=640, text=(
+            "Fit keeps the whole view; Crop fills the output and trims the edges. "
+            "General > Wallpaper > Position then places the finished file on the desktop."
+        )).grid(row=9, column=0, columnspan=2, pady=3, sticky="w")
         source_changed(IMAGE_SOURCE)
         ttk.Label(image_tab, textvariable=status_variables["image_source"],
                   wraplength=640).grid(row=1, column=0, pady=(0, 8), sticky="ew")
@@ -7168,6 +7308,36 @@ def run_with_windows_tray(argv=None):
             "provides Content-Length for the complete transfer. Tiled and "
             "multi-request images remain indeterminate until their total is known."
         )).grid(row=5, column=0, columnspan=2, pady=(5, 0), sticky="w")
+
+        download_retry_frame = ttk.LabelFrame(
+            download_tab, text="Download retries", padding=8
+        )
+        download_retry_frame.grid(row=1, column=0, pady=(0, 8), sticky="ew")
+        add_combo(
+            download_retry_frame, 0, "Retries after first attempt",
+            variables["download_retries"], tuple(str(value) for value in range(1, 10)),
+            width=8,
+        )
+        ttk.Label(download_retry_frame, wraplength=640, text=(
+            "Applies globally to temporary image-transfer errors. "
+            "1-9 retries mean 2-10 total attempts. Invalid requests and "
+            "authentication errors fail immediately."
+        )).grid(row=1, column=0, columnspan=2, pady=(5, 0), sticky="w")
+
+        catalogue_retry_frame = ttk.LabelFrame(
+            download_tab, text="Catalogue retries", padding=8
+        )
+        catalogue_retry_frame.grid(row=2, column=0, pady=(0, 8), sticky="ew")
+        add_combo(
+            catalogue_retry_frame, 0, "Retries after first attempt",
+            variables["catalogue_retries"], tuple(str(value) for value in range(1, 10)),
+            width=8,
+        )
+        ttk.Label(catalogue_retry_frame, wraplength=640, text=(
+            "Applies globally when catalogue metadata cannot be refreshed. "
+            "1-9 retries mean 2-10 total attempts. If all attempts fail, "
+            "MarbleScape uses the most recent cached catalogue when available."
+        )).grid(row=1, column=0, columnspan=2, pady=(5, 0), sticky="w")
 
         def request_picture_from_settings():
             if not force_loading_is_enabled(None):
@@ -7261,9 +7431,8 @@ def run_with_windows_tray(argv=None):
             if layer_label is None:
                 layer_label = f"Custom layer ({selected_layer})"
                 layer_label_to_value[layer_label] = selected_layer
-                satellite_combo.configure(values=tuple(layer_label_to_value))
             image_form_state.update(base=deepcopy(snapshot), loaded=True)
-            for key in ("projection", "show_extended_projections", "fit_mode", "zoom", "truecolor_black_night"):
+            for key in ("projection", "fit_mode", "zoom", "truecolor_black_night"):
                 variables[key].set(view[key])
             variables["view_preset"].set(preset_label)
             variables["satellite_layer"].set(layer_label)
@@ -7278,9 +7447,9 @@ def run_with_windows_tray(argv=None):
             if provider == "eumetsat":
                 refresh_projection_choices()
             else:
-                # Retain unused WMS values in a NOAA profile, including custom
-                # values from another MarbleScape version, without coercing them.
-                projection_combo.configure(values=available_projection_choices(view["show_extended_projections"]))
+                # Retain unused WMS values in a non-EUMETSAT profile without
+                # changing the source-specific selections.
+                projection_combo.configure(values=available_projection_choices())
             if provider == "eumetsat":
                 selections["eumetsat"]["layer"] = selected_layer
             source_settings.set_selection(provider, selections)
@@ -7334,12 +7503,18 @@ def run_with_windows_tray(argv=None):
         def apply_image_profile(snapshot):
             normalized = normalize_image_settings_snapshot(snapshot)
             requested_library = profile_settings.get_library()
+            requested_profile_columns = profile_settings.get_visible_columns()
             requested_auth = source_settings.get_copernicus_auth(require=False)
 
             def transform(text):
                 updated = replace_image_settings(text, normalized)
-                return replace_copernicus_auth_configuration(
+                updated = replace_copernicus_auth_configuration(
                     updated, requested_auth
+                )
+                updated = ensure_profile_list_configuration_section(updated)
+                return replace_toml_section_value(
+                    updated, "profile_list", "visible_columns",
+                    list(requested_profile_columns),
                 )
 
             changed = update_active_configuration_and_profiles(
@@ -7354,11 +7529,21 @@ def run_with_windows_tray(argv=None):
         profile_settings = ProfilesSettings(profiles_tab, IMAGE_PROFILE_LIBRARY,
                                              capture_image_form, load_image_form,
                                              on_apply=apply_image_profile,
-                                             status=profile_status_text)
+                                             status=profile_status_text,
+                                             visible_columns=PROFILE_LIST_VISIBLE_COLUMNS)
         profile_settings.frame.grid(row=0, column=0, sticky="ew")
 
+        latest_folder_frame = ttk.LabelFrame(
+            history_tab, text="Latest image folder", padding=8
+        )
+        latest_folder_frame.grid(row=0, column=0, pady=(0, 8), sticky="ew")
+        add_folder_picker(
+            latest_folder_frame, 0, "Custom latest folder", "latest_folder",
+            CONTENT_DIR / LATEST_DIRECTORY_NAME, "Open latest folder",
+        )
+
         history_frame = ttk.LabelFrame(history_tab, text="History", padding=8)
-        history_frame.grid(row=0, column=0, pady=(0, 8), sticky="ew")
+        history_frame.grid(row=1, column=0, pady=(0, 8), sticky="ew")
         ttk.Checkbutton(
             history_frame,
             text="Enable history",
@@ -7385,7 +7570,7 @@ def run_with_windows_tray(argv=None):
 
         add_folder_picker(
             history_frame, 4, "Custom history folder", "history_folder",
-            CONTENT_DIR / HISTORY_DIRECTORY_NAME,
+            CONTENT_DIR / HISTORY_DIRECTORY_NAME, "Open history folder",
         )
 
         status_frame = ttk.LabelFrame(
@@ -7394,7 +7579,7 @@ def run_with_windows_tray(argv=None):
             padding=8,
         )
         status_frame.grid(
-            row=1,
+            row=2,
             column=0,
             columnspan=2,
             pady=(0, 8),
@@ -7465,7 +7650,7 @@ def run_with_windows_tray(argv=None):
             padding=8,
         )
         cache_frame.grid(
-            row=2,
+            row=3,
             column=0,
             columnspan=2,
             pady=(0, 8),
@@ -7636,6 +7821,16 @@ def run_with_windows_tray(argv=None):
                 )
                 source_row += 1
 
+        info_frame = ttk.LabelFrame(info_tab, text="Best Practice / How to", padding=10)
+        info_frame.grid(row=0, column=0, pady=(0, 8), sticky="ew")
+        info_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            info_frame,
+            text=BEST_PRACTICE_TEXT,
+            wraplength=650,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+
         about_frame = ttk.LabelFrame(about_tab, text="About MarbleScape", padding=10)
         about_frame.grid(row=0, column=0, pady=(0, 8), sticky="ew")
         about_frame.columnconfigure(0, weight=1)
@@ -7768,6 +7963,10 @@ def run_with_windows_tray(argv=None):
             anchor="w",
         )
         download_status_label.grid(row=0, column=0, padx=(0, 12), sticky="ew")
+        completion_status = tk.StringVar(value="")
+        ttk.Label(download_status_frame, textvariable=completion_status).grid(
+            row=0, column=1, padx=(0, 10), sticky="w"
+        )
         download_progress_value = tk.DoubleVar(value=0.0)
         download_progress_bar = ttk.Progressbar(
             download_status_frame,
@@ -7776,7 +7975,7 @@ def run_with_windows_tray(argv=None):
             length=210,
             mode="determinate",
         )
-        download_progress_bar.grid(row=0, column=1, sticky="e")
+        download_progress_bar.grid(row=0, column=2, sticky="e")
         download_progress_bar.grid_remove()
 
         def cancel_download():
@@ -7789,7 +7988,7 @@ def run_with_windows_tray(argv=None):
             text="Cancel download",
             command=cancel_download,
         )
-        cancel_download_button.grid(row=0, column=2, padx=(10, 0), sticky="e")
+        cancel_download_button.grid(row=0, column=3, padx=(10, 0), sticky="e")
         cancel_download_button.state(["disabled"])
 
         def refresh_download_status():
@@ -7802,6 +8001,7 @@ def run_with_windows_tray(argv=None):
             snapshot = DOWNLOAD_PROGRESS.snapshot(
                 keep_completed_visible=keep_completed_visible
             )
+            completion_status.set(download_completion_text(snapshot))
             if (
                 snapshot["active"]
                 and snapshot["cancellable"]
@@ -7873,6 +8073,7 @@ def run_with_windows_tray(argv=None):
 
                 updates = normalize_settings_form_values(raw_values, provider=requested_source)
                 requested_library = profile_settings.get_library()
+                requested_profile_columns = profile_settings.get_visible_columns()
                 image_snapshot = capture_image_form(updates)
                 startup_before_save = is_windows_startup_enabled()
                 requested_startup = bool(raw_values["start_with_windows"])
@@ -7906,7 +8107,11 @@ def run_with_windows_tray(argv=None):
                         updated = replace_copernicus_auth_configuration(
                             updated, requested_copernicus_auth
                         )
-                        return updated
+                        updated = ensure_profile_list_configuration_section(updated)
+                        return replace_toml_section_value(
+                            updated, "profile_list", "visible_columns",
+                            list(requested_profile_columns),
+                        )
 
                     changed = update_active_configuration_and_profiles(
                         transform_configuration, requested_library
@@ -7971,8 +8176,9 @@ def run_with_windows_tray(argv=None):
         for page in notebook.tabs():
             bind_page_scrolling(root.nametowidget(page))
         for section in (
-            preset_frame, wallpaper_frame, display_time_frame, view_frame, output_frame,
-            update_frame, download_display_frame, history_frame, status_frame, cache_frame,
+            preset_frame, generic_view_frame, wallpaper_frame, display_time_frame, output_frame,
+            update_frame, download_display_frame, download_retry_frame, catalogue_retry_frame,
+            latest_folder_frame, history_frame, status_frame, cache_frame,
         ):
             section.columnconfigure(1, weight=1)
         root.update_idletasks()
@@ -8029,7 +8235,7 @@ def run_with_windows_tray(argv=None):
         import tkinter as tk
         from tkinter import filedialog, messagebox
 
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.withdraw()
         root.attributes("-topmost", True)
@@ -8083,7 +8289,7 @@ def run_with_windows_tray(argv=None):
         import tkinter as tk
         from tkinter import filedialog, messagebox
 
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.withdraw()
         root.attributes("-topmost", True)
@@ -8153,7 +8359,7 @@ def run_with_windows_tray(argv=None):
         import tkinter as tk
         from tkinter import colorchooser
 
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.withdraw()
         root.attributes("-topmost", True)
@@ -8206,7 +8412,7 @@ def run_with_windows_tray(argv=None):
         import tkinter as tk
         from tkinter import simpledialog
 
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.withdraw()
         root.attributes("-topmost", True)
@@ -8264,7 +8470,7 @@ def run_with_windows_tray(argv=None):
         from tkinter import simpledialog
 
         configured_height = 0 if HEIGHT is None else HEIGHT
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.withdraw()
         root.attributes("-topmost", True)
@@ -8342,7 +8548,7 @@ def run_with_windows_tray(argv=None):
         if initial_ratio is None and WIDTH and HEIGHT:
             initial_ratio = f"{WIDTH}:{HEIGHT}"
 
-        root = tk.Tk()
+        root = create_tray_dialog_root(tk)
         apply_tk_window_icon(root)
         root.withdraw()
         root.attributes("-topmost", True)
@@ -8470,7 +8676,7 @@ def run_with_windows_tray(argv=None):
             with IMAGE_STATUS_LOCK:
                 unavailable = bool(IMAGE_STATUS["error"])
             if unavailable:
-                return "Source unavailable — keeping previous image"
+                return "Source unavailable - keeping previous image"
         return "Standing by..."
 
     def force_loading_new_picture(icon, item):
@@ -8495,7 +8701,7 @@ def run_with_windows_tray(argv=None):
     tray_icon = pystray.Icon(
         "MarbleScape",
         create_windows_tray_image(),
-        "MarbleScape — Satellite live imagery for your desktop.",
+        "MarbleScape - Satellite live imagery for your desktop.",
         menu=pystray.Menu(
             pystray.MenuItem("Open image folder", open_output_folder),
             pystray.MenuItem(

@@ -19,7 +19,6 @@ from unittest.mock import patch
 from PIL import Image
 
 import marblescape_download as app
-from marblescape_profiles import read_library
 
 
 def source_png(size):
@@ -161,7 +160,6 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
             stack.enter_context(patch.object(profile_ui, "ProfilesSettings", side_effect=capture_profiles))
             stack.enter_context(patch.object(app, "get_noaa_client", return_value=FakeCatalogue()))
             stack.enter_context(patch.object(app, "get_catalogue_client", return_value=FakeCatalogue()))
-            stack.enter_context(patch.object(app, "migrate_legacy_windows_startup"))
             stack.enter_context(patch.object(app, "is_windows_startup_enabled", return_value=False))
             stack.enter_context(patch.object(app, "set_windows_startup_enabled", side_effect=AssertionError("Unexpected startup change")))
             stack.enter_context(patch.object(app, "create_windows_tray_image", return_value=None))
@@ -205,7 +203,7 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
             context.source.set_selection("eumetsat", saved_sources)
             values = {
                 "satellite_layer": "MTG TrueColor (day)", "projection": "North Polar",
-                "show_extended_projections": True, "fit_mode": "crop", "zoom": "1.65",
+                "fit_mode": "crop", "zoom": "1.65",
                 "truecolor_black_night": True, "width": "1024", "height": "768",
                 "aspect_ratio": "4:3", "render_scale": "1.5", "background_color": "#123456",
                 "latest_folder": (context.directory / "profile-latest").as_posix(),
@@ -227,7 +225,7 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
             context.source.select_eumetsat_layer("mtg_fd:rgb_geocolour")
             changed = {
                 "projection": "Geographic",
-                "show_extended_projections": False, "fit_mode": "fit", "zoom": "2.8",
+                "fit_mode": "fit", "zoom": "2.8",
                 "truecolor_black_night": False, "width": "800", "height": "450",
                 "aspect_ratio": "16:9", "render_scale": "auto", "background_color": "#FFFFFF",
                 "latest_folder": (context.directory / "changed-latest").as_posix(),
@@ -272,7 +270,7 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 tabs,
                 ["General", "Image", "Download", "Profiles & Rotation",
-                 "History & Storage", "Backup", "Sources", "About"],
+                 "Storage & History", "Backup", "Sources", "Info", "About"],
             )
             source_urls = {
                 str(widget.cget("text")) for widget in self.descendants(context.root)
@@ -289,6 +287,12 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
                 "https://worldview.earthdata.nasa.gov/",
                 "https://browser.dataspace.copernicus.eu/",
             })
+            info_text = "\n".join(
+                str(widget.cget("text")) for widget in self.descendants(context.root)
+                if isinstance(widget, ttk.Label)
+            )
+            self.assertIn("one available size above the required output", info_text)
+            self.assertIn("missing or partial imagery", info_text)
             section = next(
                 widget for widget in self.descendants(context.root)
                 if isinstance(widget, ttk.LabelFrame)
@@ -304,6 +308,20 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
                 "Show progress bar",
                 "Keep completed download visible until next download",
             })
+            retries = next(
+                widget for widget in self.descendants(context.root)
+                if isinstance(widget, ttk.LabelFrame)
+                and widget.cget("text") == "Download retries"
+            )
+            self.assertIn("9", next(widget for widget in retries.winfo_children()
+                                    if isinstance(widget, ttk.Combobox))["values"])
+            catalogue_retries = next(
+                widget for widget in self.descendants(context.root)
+                if isinstance(widget, ttk.LabelFrame)
+                and widget.cget("text") == "Catalogue retries"
+            )
+            self.assertIn("9", next(widget for widget in catalogue_retries.winfo_children()
+                                    if isinstance(widget, ttk.Combobox))["values"])
             cancel_download = next(
                 widget for widget in self.descendants(context.root)
                 if isinstance(widget, ttk.Button)
@@ -315,6 +333,8 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
             context.variables["show_download_progress"].set(True)
             context.variables["show_download_progress_bar"].set(False)
             context.variables["keep_completed_download_visible"].set(True)
+            context.variables["download_retries"].set("9")
+            context.variables["catalogue_retries"].set("8")
             saved = self.apply(context)
             self.assertEqual(saved["download"], {
                 "show_speed": False,
@@ -322,7 +342,70 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
                 "show_progress": True,
                 "show_progress_bar": False,
                 "keep_completed_visible": True,
+                "retries": 9,
+                "catalogue_retries": 8,
             })
+
+        self.run_dialog(scenario)
+
+    def test_storage_folder_controls_open_current_targets_below_choose(self):
+        from tkinter import ttk
+
+        def scenario(context):
+            sections = {
+                widget.cget("text"): widget for widget in self.descendants(context.root)
+                if isinstance(widget, ttk.LabelFrame)
+                and widget.cget("text") in {
+                    "Output", "Latest image folder", "History", "Status and storage"
+                }
+            }
+            latest = sections["Latest image folder"]
+            history = sections["History"]
+            self.assertEqual(int(latest.grid_info()["row"]), 0)
+            self.assertEqual(int(history.grid_info()["row"]), 1)
+            self.assertEqual(int(sections["Status and storage"].grid_info()["row"]), 2)
+            self.assertFalse(any(
+                isinstance(widget, ttk.Label)
+                and widget.cget("text") == "Custom latest folder"
+                for widget in self.descendants(sections["Output"])
+            ))
+
+            def button(section, label):
+                return next(widget for widget in self.descendants(section)
+                            if isinstance(widget, ttk.Button)
+                            and widget.cget("text") == label)
+
+            latest_open = button(latest, "Open latest folder")
+            history_open = button(history, "Open history folder")
+            for open_button in (latest_open, history_open):
+                choose = next(widget for widget in open_button.master.winfo_children()
+                              if isinstance(widget, ttk.Button)
+                              and widget.cget("text") == "Choose...")
+                self.assertEqual(int(choose.grid_info()["row"]), 0)
+            self.assertEqual(int(latest_open.grid_info()["row"]), 1)
+            self.assertEqual(int(history_open.grid_info()["row"]), 1)
+            custom_latest = context.directory / "custom-latest"
+            custom_history = context.directory / "custom-history"
+            context.variables["latest_folder"].set(str(custom_latest))
+            context.variables["history_folder"].set(str(custom_history))
+            with patch.object(app.os, "startfile") as startfile:
+                latest_open.invoke()
+                history_open.invoke()
+            self.assertTrue(custom_latest.is_dir())
+            self.assertTrue(custom_history.is_dir())
+            self.assertEqual(startfile.call_args_list, [
+                unittest.mock.call(str(custom_latest.resolve())),
+                unittest.mock.call(str(custom_history.resolve())),
+            ])
+            context.variables["latest_folder"].set("")
+            context.variables["history_folder"].set("")
+            with patch.object(app.os, "startfile") as startfile:
+                latest_open.invoke()
+                history_open.invoke()
+            self.assertEqual(startfile.call_args_list, [
+                unittest.mock.call(str((app.CONTENT_DIR / "latest").resolve())),
+                unittest.mock.call(str((app.CONTENT_DIR / "history").resolve())),
+            ])
 
         self.run_dialog(scenario)
 
@@ -423,9 +506,31 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
         def scenario(context):
             source = context.source
             preset = next(widget for widget in source.eumetsat_view_frame.winfo_children()
-                          if isinstance(widget, ttk.Combobox))
+                          if isinstance(widget, ttk.Combobox)
+                          and "Full Earth" in widget["values"])
             self.assertIs(source.eumetsat_frame.master, source.frame)
             self.assertIs(preset.master, source.eumetsat_view_frame)
+            eumetsat_labels = {
+                widget.cget("text") for widget in source.eumetsat_view_frame.winfo_children()
+                if isinstance(widget, ttk.Label)
+            }
+            self.assertTrue({"Projection", "Fit mode", "Zoom", "Preset"}.issubset(eumetsat_labels))
+            self.assertTrue(any(
+                isinstance(widget, ttk.Checkbutton)
+                and widget.cget("text") == "Black TrueColor night side"
+                for widget in source.eumetsat_view_frame.winfo_children()
+            ))
+            source._provider_var.set("NOAA GOES")
+            source._select_provider()
+            self.assertTrue(source.generic_view_frame.grid_info())
+            self.assertEqual(context.variables["zoom"].get(), "1")
+            self.assertEqual({
+                widget.cget("text") for widget in source.generic_view_frame.winfo_children()
+                if isinstance(widget, ttk.Label)
+            } & {"Fit mode", "Zoom"}, {"Fit mode", "Zoom"})
+            source._provider_var.set("EUMETSAT")
+            source._select_provider()
+            self.assertEqual(context.variables["zoom"].get(), "1.1")
             self.assertGreater(source.eumetsat_frame.grid_info()["row"], source._provider_combo.grid_info()["row"])
             general_id = next(tab for tab in context.notebook.tabs() if context.notebook.tab(tab, "text") == "General")
             general = context.root.nametowidget(general_id)

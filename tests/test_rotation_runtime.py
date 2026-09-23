@@ -1,14 +1,14 @@
 """Exercise rotation through the real update loop; network and Windows are mocked."""
 
 from copy import deepcopy
-import hashlib
 import os
 import tomllib
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import marblescape_download as app
-from marblescape_profiles import normalize_library, RotationScheduler, replace_library
+from marblescape_profiles import normalize_library, RotationScheduler
 import test_source_runtime as source_tests
 
 
@@ -77,6 +77,7 @@ class RotationRuntimeTests(unittest.TestCase):
         self.assertEqual(self.client.fetch_image.call_count, 1)
         cached_path = app.get_current_image_path()
 
+        app.set_current_image_path(None)
         self.run_cycles(1)
         self.assertEqual(self.client.fetch_image.call_count, 1)
         self.assertEqual(app.get_current_image_path(), cached_path)
@@ -101,6 +102,26 @@ class RotationRuntimeTests(unittest.TestCase):
         self.assertIn("Active profile: goes_west", app.ROTATION_STATUS["text"])
         self.assertTrue(app.get_current_image_path().is_file())
         self.assertTrue(app.get_current_image_path().is_relative_to(app.get_profile_cache().images_dir))
+
+    def test_exhausted_download_retries_skip_profile_without_multiplying_attempts(self):
+        app.IMAGE_PROFILE_LIBRARY = self.library()
+        app.DOWNLOAD_RETRIES = 1
+        seen = []
+
+        def fetch(frame, size, **options):
+            seen.append(app.IMAGE_SOURCE)
+            if app.IMAGE_SOURCE == "goes_east":
+                try:
+                    raise urllib.error.URLError("temporary outage")
+                except urllib.error.URLError as exc:
+                    raise RuntimeError("NOAA unavailable") from exc
+            return self.make_png(frame, size, **options)
+
+        self.client.fetch_image.side_effect = fetch
+        with patch.object(app, "wait_before_download_retry"):
+            self.run_cycles(2)
+        self.assertEqual(seen, ["goes_east", "goes_east", "goes_west"])
+        self.assertEqual(app.IMAGE_SOURCE, "goes_west")
 
     def test_two_failed_attempts_then_success_do_not_skip_profile(self):
         app.IMAGE_PROFILE_LIBRARY = self.library()
@@ -221,37 +242,18 @@ class RotationRuntimeTests(unittest.TestCase):
         snapshot["source"]["provider"] = "eumetsat"
         snapshot["view"]["bbox"] = [-1.0, -2.0, 3.0, 4.0]
         snapshot["layers"][0]["enabled"] = False
-        library = self.library()
-        updated = replace_library(original, library)
-        updated = app.replace_image_settings(updated, snapshot)
+        updated = app.replace_image_settings(original, snapshot)
         parsed = tomllib.loads(updated)
         before = tomllib.loads(original)
         self.assertEqual(parsed["layers"], snapshot["layers"])
         self.assertEqual(parsed["view"]["bbox"], snapshot["view"]["bbox"])
         for key in ("service", "windows", "history"):
             self.assertEqual(parsed[key], before[key])
-        self.assertEqual(parsed["image_profiles"], library)
+        self.assertNotIn("image_profiles", parsed)
         edited = app.replace_primary_wms_layer_name(updated, "mtg_fd:rgb_truecolour")
         self.assertTrue(any(layer["name"] == "mtg_fd:rgb_truecolour" for layer in tomllib.loads(edited)["layers"]))
         again = app.replace_image_settings(updated, snapshot)
         self.assertEqual(tomllib.loads(again), parsed)
-
-    def test_legacy_embedded_profiles_migrate_to_profiles_toml(self):
-        library = self.library()
-        text = replace_library(
-            app.DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8"),
-            library,
-        )
-        app.ACTIVE_CONFIG_PATH.write_text(text, encoding="utf-8")
-
-        app.load_configuration(app.ACTIVE_CONFIG_PATH)
-
-        self.assertEqual(app.IMAGE_PROFILE_LIBRARY, library)
-        self.assertEqual(app.read_profile_library_file(), library)
-        self.assertNotIn(
-            "image_profiles",
-            tomllib.loads(app.ACTIVE_CONFIG_PATH.read_text(encoding="utf-8")),
-        )
 
     def test_backup_contains_profile_library_and_rotation(self):
         library = self.library()
@@ -261,31 +263,6 @@ class RotationRuntimeTests(unittest.TestCase):
         with patch.object(app, "is_windows_startup_enabled", return_value=False):
             payload = app.create_settings_backup_payload()
         restored, restored_library, _ = app.parse_settings_backup_payload(payload)
-        self.assertNotIn("image_profiles", tomllib.loads(restored))
-        self.assertEqual(restored_library, library)
-
-    def test_version_one_backup_migrates_embedded_profile_library(self):
-        library = self.library()
-        config_text = replace_library(
-            app.DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8"),
-            library,
-        )
-        payload = {
-            "format": app.SETTINGS_BACKUP_FORMAT,
-            "version": 1,
-            "configuration_sha256": hashlib.sha256(
-                config_text.encode("utf-8")
-            ).hexdigest(),
-            "settings": app.make_json_compatible(tomllib.loads(config_text)),
-            "configuration_toml": config_text,
-            "windows_startup_enabled": False,
-        }
-
-        restored, restored_library, startup = app.parse_settings_backup_payload(
-            payload
-        )
-
-        self.assertFalse(startup)
         self.assertNotIn("image_profiles", tomllib.loads(restored))
         self.assertEqual(restored_library, library)
 

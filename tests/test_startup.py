@@ -258,46 +258,5 @@ class WindowsStartupTests(unittest.TestCase):
         with self.assertRaises(PermissionError):
             app.is_windows_startup_enabled()
 
-    def test_migration_moves_owned_legacy_value_and_is_idempotent(self):
-        old = self.command(self.folder / "earthscape.exe")
-        self.install_value(old, name="EarthScape")
-        app.migrate_legacy_windows_startup()
-        self.assertNotIn("EarthScape", self.registry.values)
-        self.assertEqual(app.capture_windows_startup_state(), (app.get_windows_startup_command(), self.registry.REG_SZ))
-        count = len(self.writes())
-        app.migrate_legacy_windows_startup()
-        self.assertEqual(len(self.writes()), count)
-
-    def test_migration_preserves_foreign_modern_value_and_rejects_substring_spoofs(self):
-        foreign = (self.command(Path(r"C:\Other Install\marblescape.exe")), self.registry.REG_SZ)
-        self.registry.values[app.WINDOWS_RUN_VALUE_NAME] = foreign
-        self.install_value(self.command(self.folder / "earthscape.exe"), name="EarthScape")
-        before = dict(self.registry.values)
-        app.migrate_legacy_windows_startup()
-        self.assertEqual(self.registry.values, before)
-        self.registry.values.clear()
-        self.install_value(self.command(Path(r"C:\Other\earthscape.exe"), config=self.folder / "x.toml"), name="EarthScape")
-        app.migrate_legacy_windows_startup()
-        self.assertNotIn(app.WINDOWS_RUN_VALUE_NAME, self.registry.values)
-        self.assertEqual(self.writes(), [])
-
-    def test_migration_failed_delete_rolls_back_both_names_and_logs_warning(self):
-        legacy = (self.command(self.folder / "earthscape.exe"), self.registry.REG_EXPAND_SZ)
-        self.registry.values["EarthScape"] = legacy
-        self.registry.fail_delete["EarthScape"] = 1
-        app.migrate_legacy_windows_startup()
-        self.assertEqual(self.registry.values, {"EarthScape": legacy})
-        self.assertTrue(any("migration warning" in str(call) for call in self.log.call_args_list))
-
-    def test_legacy_source_command_with_active_custom_config_is_migrated(self):
-        app.ACTIVE_CONFIG_PATH = self.folder / "custom config.toml"
-        command = subprocess.list2cmdline([r"C:\Python 3\pythonw.exe", str(self.folder / "eumetview_download.py"),
-                                           "--config", str(app.ACTIVE_CONFIG_PATH)])
-        self.install_value(command, name="EUMETView")
-        app.migrate_legacy_windows_startup()
-        self.assertNotIn("EUMETView", self.registry.values)
-        self.assertTrue(app.is_windows_startup_enabled())
-
-
 if __name__ == "__main__":
     unittest.main()

@@ -298,7 +298,12 @@ class NOAAClient:
         request = urllib.request.Request(url, headers=request_headers)
         try:
             # Each request owns its opener: independent WFO requests can run concurrently.
-            with urllib.request.build_opener(_Redirects()).open(request, timeout=self.timeout) as response:
+            # Catalogue pages are small, but the STAR front end can respond
+            # slowly during maintenance while its CDN remains available.
+            # Keep image transfers on the configured timeout and give metadata
+            # enough time to survive a temporarily overloaded front end.
+            timeout = self.timeout if track else min(self.timeout, 45.0)
+            with urllib.request.build_opener(_Redirects()).open(request, timeout=timeout) as response:
                 _checked_url(response.geturl())
                 try:
                     body = read_response(response, limit, track=track)
@@ -411,6 +416,19 @@ class NOAAClient:
             if not self._base_areas:
                 raise
             warnings.append("Using the last known GOES region catalogue: " + str(exc))
+            if self._metadata_unreachable(exc):
+                # One outage must not trigger hundreds of WFO/product timeouts.
+                with self._lock:
+                    if not self._areas:
+                        self._areas = {
+                            side: sorted(copy.deepcopy(list(values.values())),
+                                         key=lambda area: area["label"].casefold())
+                            for side, values in self._base_areas.items()
+                        }
+                    self._areas_time = time.monotonic()
+                    self._catalogue_errors = list(warnings)
+                    self.catalogue_warning = "NOAA catalogue is incomplete or partly cached. " + warnings[0]
+                    return copy.deepcopy(self._areas[provider])
         if provider == "solar":
             return [self._solar_area()]
         with self._discovery_lock:
@@ -465,20 +483,44 @@ class NOAAClient:
                                            "url": BASE_URL + page + "?" + urllib.parse.urlencode({param: value})}
             # WFO pages have no satellite selector. Verify their ownership instead
             # of silently showing GOES-West imagery under GOES-East (or vice versa).
+            offline = threading.Event()
+            failure_lock = threading.Lock()
+            failures = 0
+
             def classify(area):
-                try:
-                    return area, self._classify_area(area, refresh=refresh), None
-                except NOAAError as exc:
+                nonlocal failures
+                if offline.is_set():
                     with self._lock:
                         cached = self._classified.get(area["url"])
-                    return area, cached[1] if cached else set(), str(exc)
+                    return area, cached[1] if cached else set(), None, True
+                try:
+                    return area, self._classify_area(area, refresh=refresh), None, False
+                except NOAAError as exc:
+                    if self._metadata_unreachable(exc):
+                        with failure_lock:
+                            failures += 1
+                            if failures >= 3:
+                                offline.set()
+                    with self._lock:
+                        cached = self._classified.get(area["url"])
+                    return area, cached[1] if cached else set(), str(exc), False
+            skipped = 0
             with ThreadPoolExecutor(max_workers=6) as pool:
-                for area, satellites, error in pool.map(classify, additional.values()):
+                tasks = [pool.submit(classify, area) for area in additional.values()]
+                for done, task in enumerate(as_completed(tasks), 1):
+                    area, satellites, error, was_skipped = task.result()
+                    skipped += was_skipped
                     if error:
                         warnings.append(area["label"] + ": " + error)
                     for side, satellite in provider_satellites.items():
                         if satellite in satellites:
                             catalog[side][area["id"]] = dict(area, satellite=satellite)
+                    if self._refresh_future is not None:
+                        self._catalogue_progress(
+                            0, 0, f"Discovering NOAA areas ({done}/{len(tasks)})..."
+                        )
+            if skipped:
+                warnings.append(f"{skipped} NOAA areas skipped after repeated network failures.")
             order = {"Full Disk": 0, "CONUS / PACUS": 1, "Regions": 2, "Mesoscale": 3,
                      "Mesoscale locations": 4, "Weather Forecast Offices": 5, "Active storms": 6}
             result = {side: sorted(values.values(), key=lambda area: (order.get(area["category"], 99), area["label"].casefold()))
@@ -543,9 +585,19 @@ class NOAAClient:
             self._products[(provider, area["id"])] = (cached[0], cached[1], area["url"], area["satellite"])
         return cached[1]
 
+    @staticmethod
+    def _metadata_unreachable(error):
+        message = str(error)
+        return isinstance(error, UnavailableError) and (
+            "currently unreachable" in message
+            or bool(re.search(r"HTTP (?:429|5\d\d)", message))
+        )
+
     def list_products(self, provider, area_id, refresh=False):
         after = time.monotonic() if refresh else None
-        area = self._area(provider, area_id, refresh=refresh)
+        # A product refresh must not repeat the entire area/WFO discovery.
+        # The caller refreshes areas first when that is required.
+        area = self._area(provider, area_id)
         products = self._products_for_area(provider, area, after=after)
         return [{"id": value["id"], "label": value["label"], "resolutions": list(value["resolutions"])}
                 for value in products]
@@ -692,29 +744,53 @@ class NOAAClient:
                 pairs.extend((provider, area) for area in areas)
                 providers += 1
             except NOAAError as exc:
-                errors.append(provider + ": " + str(exc))
+                errors.append(str(exc))
+                # Every NOAA provider needs the same base index. When no base
+                # catalogue exists, repeating the identical request for West
+                # and Solar only adds two more timeouts and duplicate errors.
+                with self._lock:
+                    base_available = bool(self._base_areas)
+                if not base_available:
+                    break
         with self._lock:
             errors.extend(self._catalogue_errors)
         total = len(pairs)
         self._catalogue_progress(0, total, "Loading NOAA product catalogues...")
         products_count = resolution_count = 0
+        offline = threading.Event()
+        failure_lock = threading.Lock()
+        failures = 0
+        if any("Using the last known GOES region catalogue" in error for error in errors):
+            offline.set()
         def load(pair):
+            nonlocal failures
+            if offline.is_set():
+                return 0, 0, None, True
             provider, area = pair
             try:
                 products = self._products_for_area(provider, area, after=started if refresh else None)
-                return len(products), sum(len(product["resolutions"]) for product in products), None
+                return len(products), sum(len(product["resolutions"]) for product in products), None, False
             except NOAAError as exc:
-                return 0, 0, provider + " / " + area["label"] + ": " + str(exc)
+                if self._metadata_unreachable(exc):
+                    with failure_lock:
+                        failures += 1
+                        if failures >= 3:
+                            offline.set()
+                return 0, 0, provider + " / " + area["label"] + ": " + str(exc), False
+        skipped = 0
         with ThreadPoolExecutor(max_workers=6) as pool:
             tasks = {pool.submit(load, pair): pair for pair in pairs}
             for done, task in enumerate(as_completed(tasks), 1):
-                count, sizes, error = task.result()
+                count, sizes, error, was_skipped = task.result()
                 products_count += count
                 resolution_count += sizes
+                skipped += was_skipped
                 if error:
                     errors.append(error)
                 provider, area = tasks[task]
                 self._catalogue_progress(done, total, provider + " / " + area["label"])
+        if skipped:
+            errors.append(f"{skipped} NOAA product catalogues skipped after repeated network failures.")
         errors = list(dict.fromkeys(errors))
         warning = ""
         if errors:

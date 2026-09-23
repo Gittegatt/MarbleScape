@@ -270,7 +270,8 @@ class SliderClient:
         })
         try:
             opener = self._opener or urllib.request.build_opener(_Redirects())
-            with opener.open(request, timeout=self.timeout) as response:
+            timeout = self.timeout if track else min(self.timeout, 20.0)
+            with opener.open(request, timeout=timeout) as response:
                 _checked_url(response.geturl())
                 try:
                     return read_response(response, limit, track=track), dict(response.headers.items())

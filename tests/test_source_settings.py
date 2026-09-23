@@ -8,6 +8,7 @@ from copy import deepcopy
 import gc
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -28,6 +29,8 @@ class FakeNOAAClient:
         self.all_refresh_started = threading.Event()
         self.all_summary = None
         self.catalogue_refresh_status = {"running": False, "done": 0, "total": 0, "message": "", "error": ""}
+        self.retries = 2
+        self.copernicus_dates = None
         self.areas = {
             "goes_east": [
                 {"id": "full_disk", "label": "Full Disk", "category": "Global"},
@@ -110,6 +113,12 @@ class FakeNOAAClient:
             progress(4, 4, "All NOAA catalogues are ready.")
         return deepcopy(summary)
 
+    def cached_copernicus_dates(self, _profile, _output_size):
+        return deepcopy(self.copernicus_dates)
+
+    def store_copernicus_dates(self, _profile, _output_size, dates):
+        self.copernicus_dates = deepcopy(dates)
+
 
 @unittest.skipIf(tk is None, "Tkinter is not installed")
 class SourceSettingsTests(unittest.TestCase):
@@ -167,8 +176,36 @@ class SourceSettingsTests(unittest.TestCase):
 
     @staticmethod
     def select_provider(controller, provider):
-        controller._provider_var.set(source_settings.PROVIDER_LABELS[provider])
+        controller._provider_var.set(source_settings.image_source_label(provider))
         controller._select_provider()
+        if provider in source_settings.GOES_SATELLITES:
+            controller._goes_var.set(source_settings.GOES_SATELLITES[provider])
+            controller._select_goes_satellite()
+
+    def test_goes_source_groups_satellites_without_losing_selections(self):
+        settings = self.make_settings("goes_west")
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._provider_combo["values"].count("NOAA GOES"), 1)
+        self.assertNotIn("GOES-East", settings._provider_combo["values"])
+        self.assertNotIn("GOES-West", settings._provider_combo["values"])
+        self.assertEqual(settings._provider_var.get(), "NOAA GOES")
+        self.assertEqual(settings._goes_var.get(), "GOES-West")
+        self.assertTrue(settings._goes_combo.grid_info())
+        settings._goes_var.set("GOES-East")
+        settings._select_goes_satellite()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[0], "goes_east")
+        self.select_provider(settings, "solar")
+        self.wait_for_catalogue(settings)
+        self.assertFalse(settings._goes_combo.grid_info())
+        settings._provider_var.set("NOAA GOES")
+        settings._select_provider()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[0], "goes_east")
+        settings.set_selection("goes_west", source_settings.DEFAULT_PROFILES)
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._goes_var.get(), "GOES-West")
+        self.assertEqual(settings.get_selection()[0], "goes_west")
 
     def test_eumetsat_needs_no_catalogue_and_init_does_not_call_on_change(self):
         changes = []
@@ -180,12 +217,52 @@ class SourceSettingsTests(unittest.TestCase):
         self.wait_for_catalogue(settings)
         self.assertEqual(changes, ["goes_east"])
 
+    def test_hidden_eumetsat_update_does_not_restore_its_view(self):
+        changes = []
+        settings = self.make_settings(on_change=changes.append)
+        self.select_provider(settings, "copernicus")
+        self.assertEqual(changes, ["copernicus"])
+        settings._eumetsat_changed()
+        self.assertEqual(changes, ["copernicus"])
+        self.select_provider(settings, "eumetsat")
+        settings._eumetsat_changed()
+        self.assertEqual(changes, ["copernicus", "eumetsat", "eumetsat"])
+
     def test_default_new_source_waits_for_catalogue_validation(self):
         settings = self.make_settings("goes_east", profiles={})
         with self.assertRaises(ValueError):
             settings.get_selection()
         self.wait_for_catalogue(settings)
         self.assertEqual(settings.get_selection()[1]["goes_east"]["resolution"], "auto")
+
+    def test_himawari_auto_default_and_catalogue_activity(self):
+        settings = self.make_settings("himawari")
+        self.assertTrue(settings._catalogue_activity.active)
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings.get_selection()[1]["himawari"]["resolution"], "auto")
+        self.assertEqual(settings._resolution_var.get(), "Automatic (recommended)")
+        self.assertEqual(settings._catalogue_activity.completion.get(), "Completed.")
+        settings._refresh()
+        self.assertTrue(settings._catalogue_activity.active)
+        self.assertEqual(settings._catalogue_activity.completion.get(), "")
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._catalogue_activity.completion.get(), "Completed.")
+
+    def test_eumetsat_catalogue_activity_completes_without_network(self):
+        from marblescape_eumetsat import _FALLBACK_ITEM
+
+        client = FakeNOAAClient()
+        client.eumetsat = SimpleNamespace(catalogue=lambda refresh=False: [dict(_FALLBACK_ITEM)])
+        settings = self.make_settings(client=client)
+        eumetsat = settings.eumetsat_settings
+        self.assertTrue(eumetsat._activity.active)
+        deadline = time.monotonic() + 3
+        while eumetsat._activity.active:
+            if time.monotonic() > deadline:
+                self.fail("EUMETSAT catalogue fixture did not complete")
+            self.root.update()
+            time.sleep(0.01)
+        self.assertEqual(eumetsat._activity.completion.get(), "Completed.")
 
     def test_area_filter_does_not_change_the_selected_area(self):
         settings = self.make_settings("goes_east")
@@ -226,6 +303,68 @@ class SourceSettingsTests(unittest.TestCase):
         result = settings.get_selection()[1]
         result["goes_east"]["product"] = "mutated"
         self.assertEqual(settings.get_selection()[1]["goes_east"]["product"], "13")
+
+    def test_himawari_new_area_prefers_true_color_reproduction(self):
+        settings = self.make_settings("himawari")
+        self.wait_for_catalogue(settings)
+        settings._profiles["himawari"]["product"] = ""
+        settings._receive_products([
+            {"id": "dnc", "label": "Natural Color RGB", "resolutions": ["800x600"]},
+            {"id": "b13", "label": "Infrared", "resolutions": ["800x600"]},
+            {"id": "trm", "label": "True Color Reproduction Image", "resolutions": ["800x600"]},
+        ])
+        self.assertEqual(settings._profiles["himawari"]["product"], "trm")
+
+    def test_worldview_new_layer_category_prefers_true_color(self):
+        client = FakeNOAAClient()
+        client.areas["worldview"].extend([
+            {"id": "VIIRS_NDVI", "label": "Vegetation index", "category": "Other"},
+            {"id": "MODIS_TrueColor", "label": "Corrected Reflectance (True Color)", "category": "Other"},
+        ])
+        settings = self.make_settings("worldview", client=client)
+        self.wait_for_catalogue(settings)
+        settings._category_var.set("Other")
+        settings._select_category()
+        self.wait_for_catalogue(settings)
+        self.assertEqual(settings._profiles["worldview"]["area"], "MODIS_TrueColor")
+
+    def test_single_document_sources_refresh_metadata_only_once(self):
+        for provider in ("slider", "worldview"):
+            with self.subTest(provider=provider):
+                client = FakeNOAAClient()
+                settings = self.make_settings(provider, client=client)
+                self.wait_for_catalogue(settings)
+                client.calls.clear()
+                settings._refresh()
+                self.wait_for_catalogue(settings)
+                self.assertIn(("areas", provider, True), client.calls)
+                self.assertIn(("products", provider, settings._profiles[provider]["area"], False), client.calls)
+                settings.close()
+
+    def test_copernicus_configuration_defaults_to_true_color_layer(self):
+        settings = self.make_settings("copernicus")
+        copernicus = settings.copernicus_settings
+        copernicus._configuration_var.set("Wildfires")
+        copernicus._select_configuration()
+        self.assertEqual(copernicus._mission_var.get(), "Sentinel-2")
+        self.assertEqual(copernicus._selected_product()["name"], "Wildfires (S2L2A)")
+        self.assertEqual(copernicus._selected_layer()["name"].casefold(), "true color")
+
+    def test_copernicus_new_configuration_avoids_gas_and_keeps_saved_false_color(self):
+        settings = self.make_settings("copernicus")
+        copernicus = settings.copernicus_settings
+        copernicus._mission_var.set("Sentinel-5P")
+        copernicus._select_mission()
+        copernicus._configuration_var.set("Wildfires")
+        copernicus._select_configuration()
+        self.assertEqual(copernicus._mission_var.get(), "Sentinel-2")
+        false_color = next(item for item in copernicus._selected_product()["layers"]
+                           if item["name"].casefold() == "false color")
+        saved = dict(source_settings.DEFAULT_COPERNICUS_PROFILE)
+        saved.update(configuration="WILDFIRES", mission="Sentinel-2",
+                     product=copernicus._selected_product()["id"], layer=false_color["id"])
+        copernicus.set_profile(saved)
+        self.assertEqual(copernicus._selected_layer()["id"], false_color["id"])
 
     def test_himawari_uses_shared_area_product_and_resolution_controls(self):
         settings = self.make_settings("himawari")
@@ -306,7 +445,7 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertIn("new images may be unavailable", settings._status_var.get())
         self.assertEqual(str(settings._area_combo["state"]), "readonly")
         self.assertTrue(settings._area_combo["values"])
-        self.assertEqual(settings._client.calls, [("areas", "goes_east", False)])
+        self.assertEqual(settings._client.calls, [("areas", "goes_east", True)])
         settings._category_var.set("Local")
         settings._select_category()
         with self.assertRaises(ValueError):
@@ -325,7 +464,7 @@ class SourceSettingsTests(unittest.TestCase):
         self.wait_for_catalogue(settings)
         self._join_workers()
         self.assertEqual(settings._client.calls,
-                         [("areas", "solar", False), ("products", "solar", "sun", False)])
+                         [("areas", "solar", True), ("products", "solar", "sun", True)])
         self.assertEqual(settings.provider, "solar")
         self.assertEqual([area["id"] for area in settings._areas], ["sun"])
 
@@ -412,11 +551,20 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertEqual(cop.get_profile()["date"], "latest")
         self.assertEqual(cop.get_profile()["coverage_mode"], "fill_gaps")
         self.assertEqual(cop.get_profile()["lookback_days"], 14)
+        self.assertEqual(cop.get_profile()["max_cloud_cover"], 30)
+        self.assertEqual(str(cop._cloud_scale["state"]), "normal")
+        cop._cloud_scale.set(15)
+        self.assertEqual(cop.get_profile()["max_cloud_cover"], 15)
         self.assertEqual(
             cop._lookback_combo["values"],
-            ("3 days", "7 days", "14 days", "30 days", "45 days", "60 days", "90 days"),
+            tuple(f"{days} days" for days in
+                  (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 730)),
         )
         self.assertEqual(str(cop._lookback_combo["state"]), "readonly")
+        cop._coverage_var.set("Single latest acquisition")
+        cop._select_coverage()
+        self.assertEqual(str(cop._cloud_scale["state"]), "normal")
+        self.assertEqual(str(cop._lookback_combo["state"]), "disabled")
         l1c_label = next(label for label, product in cop._product_by_label.items()
                          if product["name"] == "Sentinel-2 L1C")
         cop._zoom_var.set("7")
@@ -435,8 +583,10 @@ class SourceSettingsTests(unittest.TestCase):
 
         cop._mission_var.set("Sentinel-1")
         cop._select_mission()
+        self.assertEqual(str(cop._cloud_scale["state"]), "disabled")
         cop._mission_var.set("Sentinel-2")
         cop._select_mission()
+        self.assertEqual(str(cop._cloud_scale["state"]), "normal")
         self.assertEqual(cop.get_profile()["product"], "DEFAULT-THEME::a91f72")
         cop._mission_var.set("Sentinel-1")
         cop._select_mission()
@@ -454,13 +604,50 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertFalse(profiles["copernicus"]["map_labels"])
         self.assertEqual(profiles["copernicus"]["coverage_mode"], "black")
         self.assertEqual(profiles["copernicus"]["lookback_days"], 14)
-        self.assertNotIn("black_nodata", profiles["copernicus"])
+        self.assertEqual(profiles["copernicus"]["max_cloud_cover"], 15)
         self.assertEqual(settings.get_copernicus_auth(),
                          {"client_id": "client", "client_secret": "secret"})
+
+    def test_copernicus_catalogue_activity_reports_completion(self):
+        settings = self.make_settings(
+            "copernicus", copernicus_auth={"client_id": "client", "client_secret": "secret"}
+        )
+        copernicus = settings.copernicus_settings
+        with mock.patch("marblescape_copernicus_settings.CopernicusClient") as client:
+            client.return_value.list_dates.return_value = ["2026-09-21"]
+            copernicus.refresh_dates()
+            self.assertTrue(copernicus._activity.active)
+            deadline = time.monotonic() + 3
+            while copernicus._activity.active:
+                if time.monotonic() > deadline:
+                    self.fail("Copernicus catalogue fixture did not complete")
+                self.root.update()
+                time.sleep(0.01)
+        self.assertEqual(copernicus._activity.completion.get(), "Completed.")
+        self.assertIn("2026-09-21", copernicus._date_combo["values"])
 
         missing = self.make_settings("copernicus")
         with self.assertRaises(ValueError):
             missing.get_selection()
+
+    def test_copernicus_catalogue_retries_then_uses_cached_dates(self):
+        client = FakeNOAAClient()
+        client.copernicus_dates = ["2026-09-20"]
+        with mock.patch("marblescape_copernicus_settings.CopernicusClient") as cop_client:
+            cop_client.return_value.list_dates.side_effect = OSError("catalogue offline")
+            settings = self.make_settings(
+                "copernicus", client=client,
+                copernicus_auth={"client_id": "client", "client_secret": "secret"},
+            )
+            deadline = time.monotonic() + 3
+            while settings.copernicus_settings._activity.active:
+                if time.monotonic() > deadline:
+                    self.fail("Copernicus cached catalogue fixture did not complete")
+                self.root.update()
+                time.sleep(0.01)
+        self.assertEqual(cop_client.return_value.list_dates.call_count, 3)
+        self.assertIn("2026-09-20", settings.copernicus_settings._date_combo["values"])
+        self.assertIn("using cached catalogue data", settings.copernicus_settings._status_var.get())
 
     def test_active_storm_category_selects_and_commits_first_storm(self):
         settings = self.make_settings("goes_east")
@@ -538,6 +725,8 @@ class SourceSettingsTests(unittest.TestCase):
         settings._sync_global_refresh()
         self.assertIn("1/4", settings._all_status_var.get())
         self.assertEqual(settings._all_progress_var.get(), 25)
+        self.assertTrue(settings._all_progress_running)
+        self.assertEqual(str(settings._all_progress["mode"]), "indeterminate")
         self.assertEqual(str(settings._all_refresh_button["state"]), "disabled")
         settings._refresh_all()
         self.assertEqual(client.calls.count(("all", True)), 1)
@@ -554,6 +743,8 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertEqual(settings.provider, "solar")
         self.assertIn("3 sources, 7 areas", settings._all_status_var.get())
         self.assertEqual(settings._all_progress_var.get(), 100)
+        self.assertFalse(settings._all_progress_running)
+        self.assertEqual(settings._all_completion_var.get(), "Completed.")
         self.assertEqual(str(settings._all_refresh_button["state"]), "normal")
 
     def test_initial_startup_refresh_is_observed_without_starting_a_second_job(self):
@@ -562,6 +753,7 @@ class SourceSettingsTests(unittest.TestCase):
                                            "message": "Startup catalogue loading", "error": ""}
         settings = self.make_settings(client=client)
         self.assertIn("3/10", settings._all_status_var.get())
+        self.assertTrue(settings._all_progress_running)
         self.assertEqual(str(settings._all_refresh_button["state"]), "disabled")
         settings._refresh_all()
         self.assertEqual(client.calls, [])
@@ -569,6 +761,7 @@ class SourceSettingsTests(unittest.TestCase):
                                            "message": "All NOAA catalogues are ready.", "error": ""}
         settings._sync_global_refresh()
         self.assertIn("ready", settings._all_status_var.get())
+        self.assertEqual(settings._all_completion_var.get(), "Completed.")
         self.assertEqual(str(settings._all_refresh_button["state"]), "normal")
 
     def test_partial_full_refresh_warning_is_visible_without_disabling_current_selection(self):
@@ -585,7 +778,13 @@ class SourceSettingsTests(unittest.TestCase):
             self.root.update()
             time.sleep(0.01)
         self.wait_for_catalogue(settings)
-        self.assertIn("One storm unavailable", settings._all_status_var.get())
+        self.assertIn("One storm unavailable", settings._all_details_var.get())
+        self.assertEqual(settings._all_completion_var.get(), "Finished with issues.")
+        self.assertTrue(settings._all_separator.grid_info())
+        self.assertGreater(
+            int(settings._all_details_label.grid_info()["row"]),
+            6,
+        )
         self.assertEqual(settings.get_selection()[0], "goes_east")
 
     def test_close_does_not_cancel_shared_full_catalogue_refresh(self):

@@ -3,6 +3,7 @@
 from contextlib import ExitStack, redirect_stdout
 from copy import deepcopy
 import io
+import json
 from pathlib import Path
 import tempfile
 import tomllib
@@ -121,16 +122,7 @@ class SourceRuntimeTests(unittest.TestCase):
             image.load()
         return files[0]
 
-    def test_default_content_paths_and_safe_legacy_image_migration(self):
-        legacy_latest = self.root / "latest"
-        legacy_history = self.root / "history"
-        legacy_latest.mkdir()
-        legacy_history.mkdir()
-        latest_data = self.make_png({}, (32, 18))
-        history_data = self.make_png({}, (16, 9))
-        (legacy_latest / "marblescape_old.png").write_bytes(latest_data)
-        (legacy_history / "marblescape_history.png").write_bytes(history_data)
-        (legacy_latest / "keep.txt").write_text("unrelated", encoding="utf-8")
+    def test_default_content_paths_are_created(self):
         app.ENABLE_HISTORY = True
 
         app.ensure_directories()
@@ -138,10 +130,8 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertEqual(app.CONTENT_DIR, self.root / "content")
         self.assertEqual(app.LATEST_DIR, self.root / "content" / "latest")
         self.assertEqual(app.HISTORY_DIR, self.root / "content" / "history")
-        self.assertEqual((app.LATEST_DIR / "marblescape_old.png").read_bytes(), latest_data)
-        self.assertEqual((app.HISTORY_DIR / "marblescape_history.png").read_bytes(), history_data)
-        self.assertTrue((legacy_latest / "keep.txt").exists())
-        self.assertFalse(legacy_history.exists())
+        self.assertTrue(app.LATEST_DIR.is_dir())
+        self.assertTrue(app.HISTORY_DIR.is_dir())
 
     def test_latest_and_history_cannot_be_stored_inside_managed_cache_paths(self):
         safe = self.root / "safe"
@@ -202,10 +192,10 @@ class SourceRuntimeTests(unittest.TestCase):
         second = self.make_png({}, (16, 9))
         managed = (
             app.HISTORY_DIR / "marblescape_2026-09-13_120000.png",
-            app.HISTORY_DIR / "earthscape_2026-09-13_110000.png",
         )
         managed[0].write_bytes(first)
-        managed[1].write_bytes(second)
+        other_product = app.HISTORY_DIR / "other_2026-09-13_110000.png"
+        other_product.write_bytes(second)
         unrelated_png = app.HISTORY_DIR / "keep.png"
         unrelated_text = app.HISTORY_DIR / "keep.txt"
         unrelated_png.write_bytes(first)
@@ -218,15 +208,16 @@ class SourceRuntimeTests(unittest.TestCase):
 
         cleared = app.clear_history_images()
 
-        self.assertEqual(cleared, {"files": 2, "bytes": len(first) + len(second)})
+        self.assertEqual(cleared, {"files": 1, "bytes": len(first)})
         self.assertTrue(all(not path.exists() for path in managed))
+        self.assertTrue(other_product.exists())
         self.assertTrue(unrelated_png.exists())
         self.assertTrue(unrelated_text.exists())
         self.assertTrue(latest.exists())
         self.assertTrue(cached.exists())
 
-    def test_legacy_config_resets_selected_noaa_source_to_eumetsat(self):
-        config = self.root / "legacy.toml"
+    def test_minimal_config_uses_current_defaults(self):
+        config = self.root / "minimal.toml"
         config.write_text('[service]\nupdate_interval_minutes = 7.0\n', encoding="utf-8")
         app.SOURCE_PROFILES["goes_east"]["area"] = "changed_area"
         app.SHOW_DOWNLOAD_SPEED = False
@@ -245,6 +236,35 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertFalse(app.KEEP_COMPLETED_DOWNLOAD_VISIBLE)
         self.assertEqual(app.UPDATE_INTERVAL_MINUTES, 7.0)
         self.assertEqual(app.DISPLAY_TIME_ZONE, "system")
+        self.assertEqual(
+            app.PROFILE_LIST_VISIBLE_COLUMNS,
+            app.DEFAULT_PROFILE_LIST_COLUMNS,
+        )
+
+    def test_profile_list_columns_are_loaded_and_saved_in_configuration(self):
+        config = self.root / "profile-list.toml"
+        config.write_text(
+            '[profile_list]\nvisible_columns = ["name", "location", "latitude", "longitude"]\n',
+            encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(
+            app.PROFILE_LIST_VISIBLE_COLUMNS,
+            ("name", "location", "latitude", "longitude"),
+        )
+
+        older = '[source]\nprovider = "eumetsat"\n'
+        updated = app.ensure_profile_list_configuration_section(older)
+        updated = app.replace_toml_section_value(
+            updated,
+            "profile_list",
+            "visible_columns",
+            ["name", "latitude", "longitude"],
+        )
+        self.assertEqual(
+            tomllib.loads(updated)["profile_list"]["visible_columns"],
+            ["name", "latitude", "longitude"],
+        )
 
     def test_source_defaults_and_normalized_profiles_are_independent_copies(self):
         provider, first = app.normalize_source_configuration("eumetsat", {})
@@ -490,6 +510,11 @@ class SourceRuntimeTests(unittest.TestCase):
         app.main(["--once"], configuration_loaded=True)
         existing = self.assert_installed_png()
         original = existing.read_bytes()
+        self.client.latest.return_value = dict(
+            self.frame,
+            timestamp="2026-09-11T12:10:00Z",
+            url=self.frame["url"].replace("1200_", "1210_"),
+        )
         self.client.fetch_image.side_effect = RuntimeError("HTTP 503")
         with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
             app.main(["--once"], configuration_loaded=True)
@@ -554,6 +579,43 @@ class SourceRuntimeTests(unittest.TestCase):
         self.client.fetch_image.assert_called_once()
         self.assert_installed_png()
 
+    def test_matching_frame_reuses_latest_after_runtime_restart(self):
+        app.main(["--once"], configuration_loaded=True)
+        installed = app.get_current_image_path()
+        app.set_current_image_path(None)
+
+        app.main(["--once"], configuration_loaded=True)
+
+        self.assertEqual(self.client.latest.call_count, 2)
+        self.client.fetch_image.assert_called_once()
+        self.assertEqual(app.get_current_image_path(), installed)
+
+    def test_matching_frame_migrates_legacy_latest_state_without_download(self):
+        app.ensure_directories()
+        signature = app.image_cache_configuration_key(app.capture_loaded_configuration())
+        installed = app.save_latest_image(
+            self.make_png({}, (32, 18)),
+            signature,
+            (32, 18),
+            source_time=self.frame["timestamp"],
+        )
+        state_path = app._latest_state_path()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["version"] = 1
+        state.pop("source_hash", None)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        app.main(["--once"], configuration_loaded=True)
+
+        self.client.latest.assert_called_once()
+        self.client.fetch_image.assert_not_called()
+        self.assertEqual(app.get_current_image_path(), installed)
+        migrated = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["version"], 2)
+        self.assertEqual(migrated["source_hash"], app.signature_digest(
+            app.noaa_frame_signature(self.frame)
+        ))
+
     def test_force_refresh_downloads_same_frame_without_duplicate_history(self):
         app.RUN_CONTINUOUSLY = True
         app.ENABLE_HISTORY = True
@@ -603,13 +665,13 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertEqual(app.IMAGE_STATUS["error"], "")
 
     def test_source_serialization_adds_tables_to_old_toml_and_preserves_wms(self):
-        legacy = (
+        existing = (
             '# Keep this comment.\n[service]\nendpoint = "https://example.invalid/wms"\n'
             '\n[[layers]]\nkind = "wms"\nname = "existing:layer"\nenabled = true\n'
         )
         profiles = deepcopy(app.SOURCE_PROFILES)
         profiles["solar"].update(product="Fe094", resolution="600x600")
-        updated = app.replace_source_configuration(legacy, "solar", profiles)
+        updated = app.replace_source_configuration(existing, "solar", profiles)
         parsed = tomllib.loads(updated)
         self.assertEqual(parsed["source"]["provider"], "solar")
         self.assertEqual(parsed["sources"], profiles)
@@ -732,7 +794,7 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertEqual(order, ["latest", "failed", "oldest"])
         self.assertEqual(downloaded, 20)
 
-    def test_backup_roundtrip_retains_source_profiles_and_legacy_remains_eumetsat(self):
+    def test_backup_roundtrip_retains_source_profiles(self):
         profiles = deepcopy(app.SOURCE_PROFILES)
         profiles["goes_west"].update(product="13", resolution="10848x10848")
         original = app.DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8")
@@ -749,13 +811,6 @@ class SourceRuntimeTests(unittest.TestCase):
         app.load_configuration(app.ACTIVE_CONFIG_PATH)
         self.assertEqual(app.IMAGE_SOURCE, "goes_west")
         self.assertEqual(app.SOURCE_PROFILES, profiles)
-        app.ACTIVE_CONFIG_PATH.write_text('[service]\nversion = "1.3.0"\n', encoding="utf-8")
-        with patch.object(app, "is_windows_startup_enabled", return_value=False):
-            old_payload = app.create_settings_backup_payload()
-        old_text, _old_profiles, _ = app.parse_settings_backup_payload(old_payload)
-        app.ACTIVE_CONFIG_PATH.write_text(old_text, encoding="utf-8", newline="")
-        app.load_configuration(app.ACTIVE_CONFIG_PATH)
-        self.assertEqual(app.IMAGE_SOURCE, "eumetsat")
 
 
 if __name__ == "__main__":

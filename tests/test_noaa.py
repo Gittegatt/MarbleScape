@@ -299,6 +299,14 @@ class SharedCatalogueTests(unittest.TestCase):
         for page in ("index.php", "fulldisk.php?sat=G19", "fulldisk.php?sat=G18", "SUVI.php?sat=G19"):
             self.assertEqual(sum(url == BASE_URL + page for url, _ in client.requests), 1, page)
 
+    def test_product_refresh_does_not_repeat_area_discovery(self):
+        client = FakeClient(all_catalogue_pages())
+        client.list_areas("goes_east", refresh=True)
+        client.requests.clear()
+        client.list_products("goes_east", "full_disk", refresh=True)
+        self.assertEqual([url for url, _ in client.requests],
+                         [BASE_URL + "fulldisk.php?sat=G19"])
+
     def test_partial_product_failure_is_reported_and_other_sources_remain_usable(self):
         pages = all_catalogue_pages()
         pages[BASE_URL + "SUVI.php?sat=G19"] = UnavailableError("Solar maintenance")
@@ -315,6 +323,43 @@ class SharedCatalogueTests(unittest.TestCase):
         def disposed_ui(*args):
             raise RuntimeError("UI was closed")
         self.assertTrue(client.refresh_all_catalogues(progress=disposed_ui)["complete"])
+
+    def test_repeated_network_failures_skip_remaining_product_pages(self):
+        class OfflineClient(FakeClient):
+            def __init__(self):
+                super().__init__({})
+                self.attempts = 0
+
+            def list_areas(self, provider, refresh=False):
+                return [{"id": str(index), "label": str(index), "url": BASE_URL + str(index),
+                         "satellite": "G19"} for index in range(30)]
+
+            def _products_for_area(self, provider, area, after=None):
+                self.attempts += 1
+                raise UnavailableError("NOAA is currently unreachable: offline fixture")
+
+        client = OfflineClient()
+        summary = client.refresh_all_catalogues()
+        self.assertFalse(summary["complete"])
+        self.assertIn("skipped after repeated network failures", summary["warning"])
+        self.assertLess(client.attempts, 90)
+        self.assertFalse(client.catalogue_refresh_status["running"])
+
+    def test_unavailable_base_index_is_requested_once_for_all_noaa_sources(self):
+        client = FakeClient({
+            BASE_URL + "index.php": UnavailableError(
+                "NOAA is currently unreachable: read operation timed out"
+            )
+        })
+        summary = client.refresh_all_catalogues()
+        self.assertFalse(summary["complete"])
+        self.assertEqual(summary["providers"], 0)
+        self.assertEqual(summary["areas"], 0)
+        self.assertEqual(len(summary["errors"]), 1)
+        self.assertEqual(
+            sum(url == BASE_URL + "index.php" for url, _headers in client.requests),
+            1,
+        )
 
     def test_simultaneous_refreshes_share_one_job_and_both_receive_progress(self):
         entered = threading.Event()

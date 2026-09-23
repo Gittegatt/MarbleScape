@@ -1,6 +1,6 @@
-"""EUMETView catalogue access and dependent settings controls.
+"""EUMETSAT catalogue access and dependent settings controls.
 
-The public EUMETView catalogue is assembled from its product decoration file
+The public EUMETSAT viewer catalogue is assembled from its product decoration file
 and the small set of Product Navigator fields needed for filtering.  No user
 account or API key is required.
 """
@@ -14,6 +14,8 @@ import re
 import threading
 import tkinter as tk
 from tkinter import ttk
+
+from marblescape_catalogue_activity import CatalogueActivity
 from urllib.request import Request, urlopen
 
 
@@ -240,7 +242,7 @@ def build_catalogue(decorations, search_response):
         ),
     )
     if not result:
-        raise EumetsatCatalogueError("EUMETSAT returned no selectable EUMETView products.")
+        raise EumetsatCatalogueError("EUMETSAT returned no selectable viewer products.")
     return result
 
 
@@ -283,11 +285,15 @@ def normalize_profile(profile):
 
 
 class EumetsatCatalogueClient:
-    def __init__(self, timeout=90, user_agent="MarbleScape"):
+    def __init__(self, timeout=90, user_agent="MarbleScape", cached_catalogue=None,
+                 on_catalogue=None, retries=2):
         self.timeout = float(timeout)
         self.user_agent = str(user_agent)
         self._lock = threading.Lock()
-        self._catalogue = None
+        self._catalogue = deepcopy(cached_catalogue) if cached_catalogue else None
+        self._on_catalogue = on_catalogue
+        self.retries = max(1, min(9, int(retries)))
+        self.catalogue_warning = ""
 
     def _json_get(self, url):
         request = Request(
@@ -324,15 +330,29 @@ class EumetsatCatalogueClient:
         with self._lock:
             if self._catalogue is not None and not refresh:
                 return deepcopy(self._catalogue)
-            try:
-                catalogue = build_catalogue(self._json_get(DECORATIONS_URL), self._search())
-            except EumetsatCatalogueError:
-                raise
-            except Exception as exc:
-                raise EumetsatCatalogueError(
-                    f"EUMETSAT catalogue is currently unavailable: {exc}"
-                ) from exc
+            problem = None
+            catalogue = None
+            for _attempt in range(self.retries + 1 if refresh else 1):
+                try:
+                    catalogue = build_catalogue(self._json_get(DECORATIONS_URL), self._search())
+                    break
+                except Exception as exc:
+                    problem = exc
+            if catalogue is None:
+                message = f"EUMETSAT catalogue is currently unavailable: {problem}"
+                if self._catalogue is not None:
+                    self.catalogue_warning = message + "; using cached catalogue data."
+                    return deepcopy(self._catalogue)
+                if isinstance(problem, EumetsatCatalogueError):
+                    raise problem
+                raise EumetsatCatalogueError(message) from problem
             self._catalogue = catalogue
+            self.catalogue_warning = ""
+            if self._on_catalogue:
+                try:
+                    self._on_catalogue(catalogue)
+                except Exception:
+                    pass
             return deepcopy(catalogue)
 
 
@@ -341,23 +361,25 @@ def _preferred(items, current_layer=None):
         matched = next((item for item in items if item["layer"] == current_layer), None)
         if matched:
             return matched
-    priorities = ("geocolour", "geocolor", "truecolour", "truecolor", "natural")
-    for priority in priorities:
-        matched = next(
-            (item for item in items
-             if priority in (item["label"] + " " + item["layer"]).casefold()),
-            None,
-        )
-        if matched:
-            return matched
-    return items[0] if items else None
+    def rank(item):
+        name = re.sub(r"[^a-z0-9]+", "", (item["label"] + " " + item["layer"]).casefold())
+        if "truecolorreproduction" in name or "truecolourreproduction" in name:
+            return 0
+        if any(value in name for value in ("geocolour", "geocolor", "truecolour", "truecolor")):
+            return 1
+        if "naturalcolour" in name or "naturalcolor" in name:
+            return 2
+        if "olcil1rgb" in name or "olcil1brgb" in name:
+            return 3
+        return 4
+    return min(items, key=rank) if items else None
 
 
 class EumetsatSettings:
     """Dependent theme, mission, product type and WMS layer controls."""
 
     def __init__(self, parent, profile, timeout=90, user_agent="MarbleScape",
-                 on_change=None, client=None):
+                 on_change=None, client=None, auto_refresh=True):
         self.frame = ttk.Frame(parent)
         self.frame.columnconfigure(1, weight=1)
         self._profile = normalize_profile(profile)
@@ -400,6 +422,9 @@ class EumetsatSettings:
         self._mission_combo = self._combo(2, "Mission", self._mission_var)
         self._type_combo = self._combo(3, "Product type", self._type_var)
         self._layer_combo = self._combo(4, "Product / layer", self._layer_var)
+        self.view_frame = ttk.Frame(self.frame)
+        self.view_frame.grid(row=5, column=0, columnspan=2, pady=(2, 0), sticky="ew")
+        self.view_frame.columnconfigure(1, weight=1)
         self._theme_combo.bind("<<ComboboxSelected>>", self._theme_changed)
         self._satellite_combo.bind("<<ComboboxSelected>>", self._satellite_changed)
         self._mission_combo.bind("<<ComboboxSelected>>", self._mission_changed)
@@ -412,10 +437,10 @@ class EumetsatSettings:
             command=self._fill_gaps_changed,
         )
         self._fill_gaps_check.grid(
-            row=5, column=0, columnspan=2, pady=(5, 2), sticky="w"
+            row=6, column=0, columnspan=2, pady=(5, 2), sticky="w"
         )
         self._lookback_combo = self._combo(
-            6, "Maximum lookback", self._lookback_var
+            7, "Maximum lookback", self._lookback_var
         )
         self._lookback_combo.configure(
             values=tuple(f"{value} hours" for value in GAP_FILL_LOOKBACK_HOURS)
@@ -424,26 +449,28 @@ class EumetsatSettings:
         ttk.Label(
             self.frame, textvariable=self._gap_fill_hint_var,
             wraplength=600, justify="left",
-        ).grid(row=7, column=0, columnspan=2, pady=(0, 2), sticky="w")
+        ).grid(row=8, column=0, columnspan=2, pady=(0, 2), sticky="w")
         self._refresh_button = ttk.Button(
             self.frame, text="Refresh EUMETSAT catalogue",
             command=lambda: self.refresh(True),
         )
-        self._refresh_button.grid(row=8, column=0, pady=(5, 2), sticky="w")
+        self._refresh_button.grid(row=9, column=0, pady=(5, 2), sticky="w")
         ttk.Label(
             self.frame,
             text=("Theme, service, mission, product type and layer combinations come "
-                  "from the public EUMETView catalogue. Projection is independent "
-                  "because EUMETView reprojects the selected layer."),
+                  "from the public EUMETSAT catalogue. Projection is independent "
+                  "because the viewer reprojects the selected layer."),
             wraplength=480, justify="left",
-        ).grid(row=8, column=1, padx=(8, 0), pady=(5, 2), sticky="w")
+        ).grid(row=9, column=1, padx=(8, 0), pady=(5, 2), sticky="w")
         ttk.Label(
             self.frame, textvariable=self._status_var,
             wraplength=600, justify="left",
-        ).grid(row=9, column=0, columnspan=2, pady=(2, 4), sticky="w")
+        ).grid(row=10, column=0, columnspan=2, pady=(2, 4), sticky="w")
+        self._activity = CatalogueActivity(self.frame, row=11)
         self.frame.bind("<Destroy>", self._destroyed, add="+")
         self._populate(preserve=True)
-        self.refresh(False)
+        if auto_refresh:
+            self.refresh(False)
         self._after_id = self.frame.after(100, self._poll)
 
     def _combo(self, row, label, variable):
@@ -582,16 +609,19 @@ class EumetsatSettings:
         self._profile["theme"] = next(
             key for key, label in THEMES if label == self._theme_var.get()
         )
+        self._profile.update(satellite="", mission="", product_type="")
         self._populate(preserve=False)
         self._emit()
 
     def _satellite_changed(self, _event=None):
         self._profile["satellite"] = self._satellite_var.get()
+        self._profile.update(mission="", product_type="")
         self._populate(preserve=False)
         self._emit()
 
     def _mission_changed(self, _event=None):
         self._profile["mission"] = self._mission_var.get()
+        self._profile["product_type"] = ""
         self._populate(preserve=False)
         self._emit()
 
@@ -632,7 +662,8 @@ class EumetsatSettings:
         self._generation += 1
         generation = self._generation
         self._refresh_button.state(["disabled"])
-        self._status_var.set("Loading EUMETView themes, missions and products...")
+        self._status_var.set("Loading EUMETSAT themes, missions and products...")
+        self._activity.start()
         client, results = self._client, self._queue
 
         def worker():
@@ -659,6 +690,7 @@ class EumetsatSettings:
                 continue
             self._refresh_button.state(["!disabled"])
             if error:
+                self._activity.finish(False)
                 self._status_var.set(
                     "Catalogue unavailable; the saved EUMETSAT layer remains usable. " + error
                 )
@@ -666,11 +698,15 @@ class EumetsatSettings:
             self._catalogue = result
             try:
                 self._populate(preserve=True)
+                warning = str(getattr(self._client, "catalogue_warning", "") or "").strip()
                 self._status_var.set(
-                    f"EUMETView catalogue loaded: {len(result)} selectable products."
+                    f"EUMETSAT catalogue loaded: {len(result)} selectable products."
+                    + (("\nCatalogue notice: " + warning) if warning else "")
                 )
+                self._activity.finish(not warning)
                 self._emit()
             except Exception as exc:
+                self._activity.finish(False)
                 self._status_var.set("Unable to display the EUMETSAT catalogue: " + str(exc))
         self._after_id = self.frame.after(100, self._poll)
 
@@ -730,6 +766,7 @@ class EumetsatSettings:
     def close(self):
         self._closed = True
         self._generation += 1
+        self._activity.close()
         if self._after_id is not None:
             try:
                 self.frame.after_cancel(self._after_id)

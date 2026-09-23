@@ -1,7 +1,6 @@
 """Validated MarbleScape image-profile TOML documents.
 
 No function in this module reads or writes files or changes wallpaper settings.
-``replace_library`` and ``remove_library`` preserve unrelated TOML text.
 
 RotationScheduler's caller owns applying/rendering an image and its retry delay:
 * When ``due()`` is true and no profile is pending, call ``start_next()``.
@@ -13,7 +12,7 @@ RotationScheduler's caller owns applying/rendering an image and its retry delay:
 
 ``current`` / ``current_id`` identify the most recently started profile.
 ``active_profile`` is an independent snapshot while a profile is in flight.
-``attempts`` counts failures of that profile; a third failure exhausts it.
+``attempts`` counts failures of that profile; the configured limit exhausts it.
 ``deadline`` uses the supplied monotonic clock (None while disabled/empty).
 """
 
@@ -193,13 +192,6 @@ def normalize_library(value) -> dict:
     return result
 
 
-def read_library(config: dict) -> dict:
-    """Read image_profiles from an already parsed configuration."""
-    if not isinstance(config, dict):
-        raise ValueError("Configuration must be a table.")
-    return normalize_library(config.get("image_profiles", {}))
-
-
 def _header_path(line: str) -> tuple[str, ...]:
     marker = "__marblescape_header_probe__"
     node = tomllib.loads(line + "\n" + marker + " = 1\n")
@@ -233,8 +225,6 @@ def _headers(text: str) -> list[tuple[int, tuple[str, ...]]]:
                     continue
                 if line.startswith(quote, index):
                     if len(quote) == 3:
-                        # TOML permits one or two content quotes immediately
-                        # before a multiline string's closing triple quote.
                         end = index + 3
                         while end < len(line) and line[end] == quote[0]:
                             end += 1
@@ -267,109 +257,23 @@ def table_spans(text, table_name):
             if path and path[0] == table_name]
 
 
-def replace_library(text: str, library: dict) -> str:
-    """Replace only image_profiles tables, preserving all other text verbatim.
-
-    Generated settings and rotation use inline TOML tables. Existing nested
-    image_profiles tables are supported; an existing top-level inline/dotted
-    image_profiles assignment is rejected instead of silently changing it.
-    Both input and output configuration text are limited to one megabyte.
-    """
-    if not isinstance(text, str):
-        raise ValueError("Configuration text must be a string.")
-    _text_size(text, "Configuration")
-    try:
-        original = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"Invalid configuration TOML: {exc}") from exc
-    library = normalize_library(library)
-    newline = "\r\n" if "\r\n" in text else "\n"
-    rows = ["[image_profiles]", "version = 1", "items = ["]
-    rows.extend("    " + _inline(item) + "," for item in library["items"])
-    rows.extend([
-        "]", "rotation = " + _inline(library["rotation"]), "",
-    ])
-    block = newline.join(rows)
-    headers = _headers(text)
-    ranges = [(offset, headers[index + 1][0] if index + 1 < len(headers) else len(text))
-              for index, (offset, path) in enumerate(headers)
-              if path and path[0] == "image_profiles"]
-    if ranges:
-        parts = []
-        cursor = 0
-        for index, (start, end) in enumerate(ranges):
-            parts.append(text[cursor:start])
-            if index == 0:
-                parts.append(block)
-                if end < len(text):
-                    parts.append(newline)
-            cursor = end
-        parts.append(text[cursor:])
-        updated = "".join(parts)
-    else:
-        if "image_profiles" in original:
-            raise ValueError("image_profiles must be stored as a TOML table header.")
-        separator = "" if not text else (newline if text.endswith(("\n", "\r")) else newline * 2)
-        updated = text + separator + block
-    _text_size(updated, "Configuration")
-    try:
-        parsed = tomllib.loads(updated)
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"Unable to serialize profile TOML: {exc}") from exc
-    if read_library(parsed) != library:
-        raise ValueError("Serialized profile library did not round-trip correctly.")
-    if {key: value for key, value in parsed.items() if key != "image_profiles"} != {
-        key: value for key, value in original.items() if key != "image_profiles"
-    }:
-        raise ValueError("Replacing profiles would change unrelated configuration.")
-    return updated
-
-
 def serialize_library(library: dict, newline: str = "\n") -> str:
     """Return a complete standalone profiles.toml document."""
     if newline not in {"\n", "\r\n"}:
         raise ValueError("Profile TOML newline must be LF or CRLF.")
-    text = replace_library("", library)
-    if newline != "\n":
-        text = text.replace("\n", newline)
+    library = normalize_library(library)
+    rows = ["[image_profiles]", "version = 1", "items = ["]
+    rows.extend("    " + _inline(item) + "," for item in library["items"])
+    rows.extend(["]", "rotation = " + _inline(library["rotation"]), ""])
+    text = newline.join(rows)
+    _text_size(text, "Profile library")
+    try:
+        parsed = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise ValueError(f"Unable to serialize profile TOML: {exc}") from exc
+    if set(parsed) != {"image_profiles"} or normalize_library(parsed["image_profiles"]) != library:
+        raise ValueError("Serialized profile library did not round-trip correctly.")
     return text
-
-
-def remove_library(text: str) -> str:
-    """Remove legacy image_profiles tables without changing other settings."""
-    if not isinstance(text, str):
-        raise ValueError("Configuration text must be a string.")
-    _text_size(text, "Configuration")
-    try:
-        original = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"Invalid configuration TOML: {exc}") from exc
-    if "image_profiles" not in original:
-        return text
-    headers = _headers(text)
-    ranges = [
-        (offset, headers[index + 1][0] if index + 1 < len(headers) else len(text))
-        for index, (offset, path) in enumerate(headers)
-        if path and path[0] == "image_profiles"
-    ]
-    if not ranges:
-        raise ValueError("image_profiles must be stored as a TOML table header.")
-    parts = []
-    cursor = 0
-    for start, end in ranges:
-        parts.append(text[cursor:start])
-        cursor = end
-    parts.append(text[cursor:])
-    updated = "".join(parts)
-    try:
-        parsed = tomllib.loads(updated)
-    except tomllib.TOMLDecodeError as exc:
-        raise ValueError(f"Unable to remove legacy profile TOML: {exc}") from exc
-    if "image_profiles" in parsed:
-        raise ValueError("Unable to remove legacy image_profiles tables.")
-    if parsed != {key: value for key, value in original.items() if key != "image_profiles"}:
-        raise ValueError("Removing profiles would change unrelated configuration.")
-    return updated
 
 
 class RotationScheduler:
@@ -381,6 +285,7 @@ class RotationScheduler:
         self._library = {}
         self.current_id = None
         self.attempts = 0
+        self.max_attempts = 3
         self.deadline = None
         self._in_flight = False
         self._next_index = 0
@@ -467,12 +372,17 @@ class RotationScheduler:
         self.attempts = 0
         self.deadline = now + self._interval
 
-    def failure(self) -> str:
-        """Return retry twice, then skip; pause if every profile exhausted retries."""
+    def set_max_attempts(self, value):
+        if type(value) is not int or not 2 <= value <= 10:
+            raise ValueError("Profile attempts must be between 2 and 10.")
+        self.max_attempts = value
+
+    def failure(self, exhausted=False) -> str:
+        """Retry up to the configured limit, then skip or pause the rotation."""
         self._require_active()
         now = self._now()
-        self.attempts += 1
-        if self.attempts < 3:
+        self.attempts = self.max_attempts if exhausted else self.attempts + 1
+        if self.attempts < self.max_attempts:
             return "retry"
         self._in_flight = False
         self._failed_ids.add(self.current_id)

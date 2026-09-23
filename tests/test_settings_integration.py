@@ -16,6 +16,45 @@ import marblescape_download as app
 
 @unittest.skipUnless(os.name == "nt", "Windows tray settings integration")
 class SettingsIntegrationTests(unittest.TestCase):
+    def test_tray_exit_closes_an_open_tk_window(self):
+        import tkinter as tk
+        import pystray
+
+        fallback_used = []
+
+        class FakeIcon:
+            def __init__(self, *args, menu, **kwargs):
+                self.menu = menu
+
+            def run(self, setup):
+                setup(self)
+                action = self.menu.items[1]._action
+                dialog = inspect.getclosurevars(action).nonlocals["run_settings_dialog"]
+                create_root = inspect.getclosurevars(dialog).nonlocals["create_tray_dialog_root"]
+                root = create_root(tk)
+                root.withdraw()
+                root.after(20, lambda: self.menu.items[-1]._action(self, None))
+
+                def fallback():
+                    fallback_used.append(True)
+                    root.destroy()
+
+                root.after(500, fallback)
+                root.mainloop()
+
+            def stop(self):
+                pass
+
+        try:
+            with patch.object(pystray, "Icon", FakeIcon), \
+                 patch.object(app, "load_configuration"), \
+                 patch.object(app, "run_application", return_value=0), \
+                 patch.object(app, "warm_public_catalogues"):
+                self.assertEqual(app.run_with_windows_tray([]), 0)
+            self.assertFalse(fallback_used, "The tray-owned Tk window did not close on Exit")
+        finally:
+            app.APPLICATION_STOP_EVENT.clear()
+
     def test_real_dialog_switches_source_and_saves_without_changing_wms_settings(self):
         import tkinter as tk
         from tkinter import ttk
@@ -103,8 +142,6 @@ class SettingsIntegrationTests(unittest.TestCase):
                     )
                     self.assertEqual(time_zone_combo.get(), "System time (recommended)")
                     time_zone_combo.set("UTC")
-                    layer_label = next(w for w in widgets if isinstance(w, ttk.Label) and w.cget("text") == "Satellite layer")
-                    self.assertFalse(layer_label.grid_info(), "WMS fields must be hidden for NOAA")
                     apply_button = next(w for w in widgets if isinstance(w, ttk.Button) and w.cget("text") == "Apply")
                     apply_button.invoke()
                     self.assertFalse(errors)
@@ -116,7 +153,6 @@ class SettingsIntegrationTests(unittest.TestCase):
                     self.assertEqual(after["view"]["projection"], before["view"]["projection"])
                     controller._provider_var.set("EUMETSAT")
                     controller._select_provider()
-                    self.assertFalse(layer_label.grid_info(), "The legacy WMS layer field stays hidden")
                     self.assertTrue(
                         controller.eumetsat_frame.grid_info(),
                         "EUMETSAT must show its catalogue controls",
@@ -137,9 +173,6 @@ class SettingsIntegrationTests(unittest.TestCase):
 
                 def switch_source():
                     widgets = list(descendants(root))
-                    layer_combo = next(w for w in widgets if isinstance(w, ttk.Combobox)
-                                       and "MTG TrueColor (day)" in w["values"])
-                    layer_combo.set("MTG TrueColor (day)")
                     quality_label = next(w for w in widgets if isinstance(w, ttk.Label)
                                          and w.cget("text") == "Render quality factor")
                     quality_entry = next(w for w in quality_label.master.winfo_children()
@@ -149,8 +182,10 @@ class SettingsIntegrationTests(unittest.TestCase):
                     quality_entry.insert(0, "invalid hidden WMS input")
                     controller = controllers[0]
                     controller.select_eumetsat_layer("mtg_fd:rgb_truecolour")
-                    controller._provider_var.set("GOES-West")
+                    controller._provider_var.set("NOAA GOES")
                     controller._select_provider()
+                    controller._goes_var.set("GOES-West")
+                    controller._select_goes_satellite()
                     root.after(150, inspect_saved)
 
                 root.after(150, switch_source)
@@ -164,7 +199,6 @@ class SettingsIntegrationTests(unittest.TestCase):
                      patch.object(app, "get_noaa_client", return_value=FakeClient()), \
                      patch.object(app, "get_catalogue_client", return_value=FakeClient()), \
                      patch.object(source_ui, "SourceSettings", side_effect=controller_factory), \
-                     patch.object(app, "migrate_legacy_windows_startup"), \
                      patch.object(app, "is_windows_startup_enabled", return_value=False), \
                      patch("tkinter.messagebox.showerror", side_effect=lambda *args, **kwargs: errors.append(args)):
                     with self.assertRaises(Finished):

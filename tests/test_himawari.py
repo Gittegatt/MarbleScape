@@ -2,6 +2,8 @@
 
 import io
 import json
+from pathlib import Path
+import tempfile
 import unittest
 
 from PIL import Image
@@ -54,6 +56,29 @@ class HimawariTests(unittest.TestCase):
         self.assertEqual(full_disk[0]["resolutions"][-1], "11000x11000")
         japan = client.list_products("himawari", "nict_japan")
         self.assertEqual(japan[0]["resolutions"][-1], "3000x2400")
+
+    def test_jma_outage_keeps_static_areas_and_skips_repeated_product_requests(self):
+        class OfflineJMA(FixtureClient):
+            def __init__(self):
+                super().__init__()
+                self.jma_requests = 0
+
+            def _refresh_nict_base(self):
+                return self._nict_base
+
+            def _html(self, url):
+                if url.startswith(himawari.JMA_BASE):
+                    self.jma_requests += 1
+                    raise himawari.UnavailableError("Himawari is currently unreachable: offline fixture")
+                return super()._html(url)
+
+        client = OfflineJMA()
+        self.assertTrue(client.list_areas("himawari", refresh=True))
+        self.assertIn("last known Himawari areas", client.catalogue_warning)
+        result = client.refresh_all_catalogues(refresh=True)
+        self.assertFalse(result["complete"])
+        self.assertEqual(client.jma_requests, 2)
+        self.assertFalse(client.catalogue_refresh_status["running"])
 
     def test_nict_latest_uses_timestamped_png_tiles_and_selected_size(self):
         client = FixtureClient()
@@ -172,8 +197,11 @@ class HimawariTests(unittest.TestCase):
                 self.calls.append(("products", provider, area, refresh))
                 return [{"id": area}]
 
-            def refresh_all_catalogues(self, refresh=True):
+            def refresh_all_catalogues(self, refresh=True, progress=None):
                 self.calls.append(("refresh", refresh))
+                if progress:
+                    progress(1, 2, "First metadata page loaded.")
+                    progress(2, 2, "All metadata pages loaded.")
                 return dict(self.summary)
 
         noaa = CatalogueFixture({"providers": 3, "areas": 5, "products": 7,
@@ -196,18 +224,95 @@ class HimawariTests(unittest.TestCase):
         })()
         client = CatalogueClient(noaa=noaa, himawari=nict_jma, slider=slider,
                                  worldview=worldview, eumetsat=eumetsat)
+        noaa.catalogue_warning = "NOAA maintenance"
+        nict_jma.catalogue_warning = "Himawari partial catalogue"
+        self.assertEqual(client.catalogue_warning_for("goes_east"), "NOAA maintenance")
+        self.assertEqual(client.catalogue_warning_for("solar"), "NOAA maintenance")
+        self.assertEqual(
+            client.catalogue_warning_for("himawari"),
+            "Himawari partial catalogue",
+        )
+        self.assertIn("NOAA maintenance", client.catalogue_warning)
+        self.assertIn("Himawari partial catalogue", client.catalogue_warning)
         self.assertEqual(client.list_areas("himawari"), [{"id": "himawari"}])
         self.assertEqual(client.list_areas("slider"), [{"id": "slider"}])
         self.assertEqual(client.list_areas("worldview"), [{"id": "worldview"}])
         self.assertEqual(client.list_products("goes_east", "full_disk"),
                          [{"id": "full_disk"}])
-        result = client.refresh_all_catalogues(refresh=True)
+        updates = []
+        result = client.refresh_all_catalogues(refresh=True, progress=lambda *args: updates.append(args))
         self.assertEqual(result["providers"], 7)
         self.assertEqual(result["areas"], 92)
         self.assertEqual(result["products"], 2502)
         self.assertEqual(result["resolution_options"], 8038)
         self.assertTrue(result["complete"])
         self.assertEqual(client.catalogue_refresh_status["running"], False)
+        self.assertTrue(any(0 < done < 1 and "NOAA" in message
+                            for done, total, message in updates))
+        self.assertTrue(any(1 < done < 2 and "Himawari" in message
+                            for done, total, message in updates))
+        self.assertEqual(updates[-1][:2], (5, 5))
+
+        noaa.summary = {
+            "providers": 0, "areas": 0, "products": 0,
+            "resolution_options": 0,
+            "errors": ["NOAA front end timed out"],
+            "warning": (
+                "NOAA catalogue refresh is incomplete. "
+                "NOAA front end timed out"
+            ),
+            "complete": False,
+        }
+        partial = client.refresh_all_catalogues(refresh=True)
+        self.assertFalse(partial["complete"])
+        self.assertEqual(partial["warning"].count("NOAA front end timed out"), 1)
+
+    def test_combined_catalogue_persists_and_reuses_last_successful_metadata(self):
+        class PublicFixture:
+            def __init__(self, fail=False):
+                self.fail = fail
+                self.calls = []
+                self.catalogue_warning = ""
+
+            def list_areas(self, provider, refresh=False):
+                self.calls.append(("areas", provider, refresh))
+                if self.fail:
+                    raise OSError("provider offline")
+                return [{"id": "full_disk", "label": "Full Disk", "category": "Global"}]
+
+            def list_products(self, provider, area_id, refresh=False):
+                self.calls.append(("products", provider, area_id, refresh))
+                if self.fail:
+                    raise OSError("provider offline")
+                return [{"id": "true_color", "label": "True Color",
+                         "resolutions": ["550x550"]}]
+
+        with tempfile.TemporaryDirectory() as directory:
+            cache_path = Path(directory) / "catalogues.json"
+            online = PublicFixture()
+            first = CatalogueClient(
+                noaa=online, himawari=online, slider=online, worldview=online,
+                eumetsat=object(), cache_path=cache_path, retries=2,
+            )
+            expected_areas = first.list_areas("himawari", refresh=True)
+            expected_products = first.list_products("himawari", "full_disk", refresh=True)
+            self.assertTrue(cache_path.is_file())
+
+            offline = PublicFixture(fail=True)
+            second = CatalogueClient(
+                noaa=offline, himawari=offline, slider=offline, worldview=offline,
+                eumetsat=object(), cache_path=cache_path, retries=2,
+            )
+            self.assertEqual(second.list_areas("himawari", refresh=True), expected_areas)
+            self.assertEqual(
+                second.list_products("himawari", "full_disk", refresh=True),
+                expected_products,
+            )
+            self.assertEqual(
+                sum(call[0] == "areas" for call in offline.calls), 3,
+                "Two retries plus the first catalogue attempt are required",
+            )
+            self.assertIn("using cached catalogue data", second.catalogue_warning_for("himawari"))
 
 
 if __name__ == "__main__":

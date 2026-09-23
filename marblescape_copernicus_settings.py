@@ -1,10 +1,13 @@
 """Tk controls for Copernicus Browser selections and live acquisition dates."""
 
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import ttk
 import webbrowser
+
+from marblescape_catalogue_activity import CatalogueActivity
 
 from marblescape_copernicus import (
     ACCOUNT_SETTINGS_URL,
@@ -19,6 +22,7 @@ from marblescape_copernicus import (
     missions,
     normalize_profile,
     products,
+    supports_cloud_filter,
     themes,
 )
 
@@ -33,15 +37,36 @@ COVERAGE_LABELS = {
 LOOKBACK_LABELS = {f"{days} days": days for days in LOOKBACK_DAYS}
 
 
+def _natural_layer_rank(layer):
+    name = re.sub(r"[^a-z0-9]+", "", str(layer.get("name", "")).casefold())
+    if name == "truecolor" or name == "truecolour":
+        return 0
+    if "truecolor" in name or "truecolour" in name:
+        return 1
+    if "naturalcolor" in name or "naturalcolour" in name:
+        return 2
+    return 3
+
+
+def _natural_product_rank(product):
+    rank = min((_natural_layer_rank(layer) for layer in product["layers"]), default=3)
+    data_types = {layer.get("data_type") for layer in product["layers"]}
+    order = ("sentinel-2-l2a", "sentinel-2-l1c", "sentinel-3-olci", "landsat-ot-l1")
+    return rank, min((order.index(item) for item in data_types if item in order), default=len(order))
+
+
 class CopernicusSettings:
     def __init__(self, parent, profile=None, auth=None, timeout=90,
-                 user_agent="MarbleScape", output_size=(1920, 1080), on_change=None):
+                 user_agent="MarbleScape", output_size=(1920, 1080), on_change=None,
+                 catalogue_client=None, catalogue_retries=2):
         self.frame = ttk.Frame(parent)
         self.frame.columnconfigure(1, weight=1)
         self._timeout = timeout
         self._user_agent = user_agent
         self._output_size = output_size
         self._on_change = on_change
+        self._catalogue_client = catalogue_client
+        self._catalogue_retries = max(1, min(9, int(catalogue_retries)))
         self._closed = False
         self._generation = 0
         self._results = queue.Queue()
@@ -61,6 +86,8 @@ class CopernicusSettings:
         self._labels_var = tk.BooleanVar(self.frame)
         self._coverage_var = tk.StringVar(self.frame)
         self._lookback_var = tk.StringVar(self.frame)
+        self._cloud_var = tk.IntVar(self.frame)
+        self._cloud_value_var = tk.StringVar(self.frame)
         self._client_id_var = tk.StringVar(self.frame, str(auth.get("client_id", "")))
         self._secret_var = tk.StringVar(self.frame, str(auth.get("client_secret", "")))
         self._status_var = tk.StringVar(self.frame)
@@ -86,15 +113,38 @@ class CopernicusSettings:
         self._lookback_combo = self._combo(
             10, "Maximum lookback", self._lookback_var, tuple(LOOKBACK_LABELS)
         )
+        ttk.Label(self.frame, text="Maximum cloud cover").grid(
+            row=11, column=0, padx=(0, 10), pady=3, sticky="w"
+        )
+        cloud_frame = ttk.Frame(self.frame)
+        cloud_frame.grid(row=11, column=1, sticky="ew")
+        cloud_frame.columnconfigure(0, weight=1)
+        self._cloud_scale = tk.Scale(
+            cloud_frame, from_=0, to=100, resolution=5, orient="horizontal",
+            showvalue=False, variable=self._cloud_var, command=self._cloud_changed,
+            highlightthickness=0,
+        )
+        self._cloud_scale.grid(row=0, column=0, sticky="ew")
+        ttk.Label(cloud_frame, textvariable=self._cloud_value_var, width=5).grid(
+            row=0, column=1, padx=(6, 0), sticky="e"
+        )
+        self._cloud_hint = ttk.Label(
+            self.frame, wraplength=560, justify="left", text=(
+                "Inclusive tile limit: 20% accepts 20% or less; 0% may find no acquisition. "
+                "The estimate is not for the exact map view. 100% allows all acquisitions. "
+                "Available only for supported optical layers."
+            ),
+        )
+        self._cloud_hint.grid(row=12, column=0, columnspan=2, pady=(0, 3), sticky="w")
         ttk.Checkbutton(
             self.frame,
             text="Map labels (places, roads, POIs and boundaries)",
             variable=self._labels_var,
             command=self._changed,
-        ).grid(row=11, column=0, columnspan=2, pady=3, sticky="w")
+        ).grid(row=13, column=0, columnspan=2, pady=3, sticky="w")
 
         auth_frame = ttk.LabelFrame(self.frame, text="Copernicus Data Space access", padding=6)
-        auth_frame.grid(row=12, column=0, columnspan=2, pady=(7, 3), sticky="ew")
+        auth_frame.grid(row=14, column=0, columnspan=2, pady=(7, 3), sticky="ew")
         auth_frame.columnconfigure(1, weight=1)
         ttk.Label(auth_frame, text="OAuth Client ID").grid(
             row=0, column=0, padx=(0, 10), pady=3, sticky="w"
@@ -122,7 +172,7 @@ class CopernicusSettings:
         self._oauth_button.grid(row=3, column=0, columnspan=2, pady=(6, 0), sticky="w")
 
         action_frame = ttk.Frame(self.frame)
-        action_frame.grid(row=13, column=0, columnspan=2, pady=(5, 0), sticky="ew")
+        action_frame.grid(row=15, column=0, columnspan=2, pady=(5, 0), sticky="ew")
         self._refresh_button = ttk.Button(
             action_frame, text="Refresh Copernicus catalogue", command=self.refresh_dates
         )
@@ -135,7 +185,8 @@ class CopernicusSettings:
         ).grid(row=0, column=1, sticky="w")
         ttk.Label(
             self.frame, textvariable=self._status_var, wraplength=570, justify="left"
-        ).grid(row=14, column=0, columnspan=2, pady=(4, 0), sticky="w")
+        ).grid(row=16, column=0, columnspan=2, pady=(4, 0), sticky="w")
+        self._activity = CatalogueActivity(self.frame, row=17)
 
         self._configuration_combo.bind("<<ComboboxSelected>>", self._select_configuration)
         self._mission_combo.bind("<<ComboboxSelected>>", self._select_mission)
@@ -201,11 +252,20 @@ class CopernicusSettings:
     def _selected_layer(self):
         return self._layer_by_label.get(self._layer_var.get())
 
-    def _build_mission_choices(self, selected):
+    def _build_mission_choices(self, selected, prefer_natural=False):
         theme = self._selected_theme()
         choices = missions(theme["id"]) if theme else []
-        if selected not in choices and choices:
-            selected = choices[0]
+        if choices:
+            natural = min(choices, key=lambda mission: min(
+                (_natural_product_rank(item) for item in products(theme["id"], mission)),
+                default=(3, 4),
+            ))
+            current_has_natural = selected in choices and min(
+                (_natural_product_rank(item)[0] for item in products(theme["id"], selected)),
+                default=3,
+            ) < 3
+            if selected not in choices or (prefer_natural and not current_has_natural):
+                selected = natural
         self._mission_combo.configure(values=choices, state="readonly" if choices else "disabled")
         self._mission_var.set(selected if selected in choices else "")
 
@@ -218,7 +278,7 @@ class CopernicusSettings:
                 if theme["id"] == DEFAULT_PROFILE["configuration"] \
                 and self._mission_var.get() == DEFAULT_PROFILE["mission"] else ""
             selected_id = preferred_id if preferred_id in {item["id"] for item in items} \
-                else items[0]["id"]
+                else min(items, key=_natural_product_rank)["id"]
         self._product_combo.configure(
             values=tuple(self._product_by_label), state="readonly" if items else "disabled"
         )
@@ -230,12 +290,22 @@ class CopernicusSettings:
         items = product["layers"] if product else []
         self._layer_by_label = self._unique_labels(items)
         if selected_id not in {item["id"] for item in items} and items:
-            selected_id = items[0]["id"]
+            selected_id = min(items, key=_natural_layer_rank)["id"]
         self._layer_combo.configure(
             values=tuple(self._layer_by_label), state="readonly" if items else "disabled"
         )
         self._layer_var.set(self._label_for_id(self._layer_by_label, selected_id))
+        self._refresh_cloud_control()
         return selected_id
+
+    def _refresh_cloud_control(self):
+        self._cloud_scale.configure(
+            state="normal" if supports_cloud_filter(self._selected_layer() or {}) else "disabled"
+        )
+
+    def _cloud_changed(self, value):
+        self._cloud_value_var.set(f"{int(float(value))}%")
+        self._changed()
 
     def _build_zoom_choices(self, selected=None):
         layer = self._selected_layer()
@@ -285,6 +355,9 @@ class CopernicusSettings:
 
     def set_profile(self, profile):
         profile = normalize_profile(profile)
+        self._generation += 1
+        self._activity.finish(False)
+        self._refresh_button.configure(state="normal")
         self._updating = True
         try:
             self._build_theme_choices(profile["configuration"])
@@ -297,6 +370,8 @@ class CopernicusSettings:
             self._build_highlight_choices(profile["highlight"])
             self._set_date_choices(profile["date"])
             self._set_coverage_controls(profile["coverage_mode"], profile["lookback_days"])
+            self._cloud_var.set(profile["max_cloud_cover"])
+            self._cloud_value_var.set(f"{profile['max_cloud_cover']}%")
             self._labels_var.set(profile["map_labels"])
             self._status_var.set(
                 "Bundled Copernicus Browser catalogue " + catalogue_revision()[:12]
@@ -333,6 +408,7 @@ class CopernicusSettings:
             "map_labels": bool(self._labels_var.get()),
             "coverage_mode": COVERAGE_LABELS.get(self._coverage_var.get(), ""),
             "lookback_days": LOOKBACK_LABELS.get(self._lookback_var.get()),
+            "max_cloud_cover": self._cloud_var.get(),
         }
         value = normalize_profile(value)
         size = self._output_size() if callable(self._output_size) else self._output_size
@@ -376,7 +452,7 @@ class CopernicusSettings:
             return
         self._updating = True
         try:
-            self._build_mission_choices(self._mission_var.get())
+            self._build_mission_choices(self._mission_var.get(), prefer_natural=True)
             self._build_product_choices("")
             self._build_layer_choices("")
             self._build_zoom_choices()
@@ -473,6 +549,10 @@ class CopernicusSettings:
     def _changed(self, *_args):
         if self._updating:
             return
+        if self._activity.active:
+            self._generation += 1
+            self._activity.finish(False)
+            self._refresh_button.configure(state="normal")
         if self._on_change:
             try:
                 self._on_change()
@@ -495,26 +575,48 @@ class CopernicusSettings:
     def refresh_dates(self):
         try:
             profile = self.get_profile()
-            auth = self.get_auth(require=True)
+            auth = self.get_auth(require=False)
             size = self._output_size() if callable(self._output_size) else self._output_size
             width, height = int(size[0]), int(size[1])
         except Exception as exc:
+            self._activity.finish(False)
             self._status_var.set(str(exc))
             return
         self._generation += 1
         generation = self._generation
         self._refresh_button.configure(state="disabled")
         self._status_var.set("Loading all available acquisition dates from Copernicus...")
+        self._activity.start()
 
         def worker():
-            try:
+            dates = None
+            problem = "Copernicus OAuth credentials are not configured."
+            if auth["client_id"] and auth["client_secret"]:
                 client = CopernicusClient(
-                    auth["client_id"], auth["client_secret"], self._timeout, self._user_agent
+                    auth["client_id"], auth["client_secret"], self._timeout,
+                    self._user_agent, network_attempts=1,
                 )
-                dates = client.list_dates(profile, (width, height))
-                self._results.put((generation, dates, None))
-            except Exception as exc:
-                self._results.put((generation, None, str(exc)))
+                for _attempt in range(self._catalogue_retries + 1):
+                    try:
+                        dates = client.list_dates(profile, (width, height))
+                        problem = ""
+                        break
+                    except Exception as exc:
+                        problem = str(exc)
+            cache = self._catalogue_client
+            if dates is not None:
+                if callable(getattr(cache, "store_copernicus_dates", None)):
+                    cache.store_copernicus_dates(profile, (width, height), dates)
+                self._results.put((generation, dates, None, False))
+                return
+            cached = (
+                cache.cached_copernicus_dates(profile, (width, height))
+                if callable(getattr(cache, "cached_copernicus_dates", None)) else None
+            )
+            if cached is not None:
+                self._results.put((generation, cached, problem, True))
+            else:
+                self._results.put((generation, None, problem, False))
 
         threading.Thread(target=worker, name="MarbleScape-Copernicus-catalogue", daemon=True).start()
 
@@ -524,11 +626,12 @@ class CopernicusSettings:
             return
         try:
             while True:
-                generation, dates, error = self._results.get_nowait()
+                generation, dates, error, cached = self._results.get_nowait()
                 if generation != self._generation:
                     continue
                 self._refresh_button.configure(state="normal")
-                if error:
+                if error and not cached:
+                    self._activity.finish(False)
                     self._status_var.set("Copernicus catalogue unavailable: " + error[:260])
                     continue
                 selected = self._date_by_label.get(self._date_var.get(), "latest")
@@ -541,7 +644,10 @@ class CopernicusSettings:
                 self._status_var.set(
                     f"Copernicus catalogue loaded: {len(dates)} available date(s). "
                     "Latest available remains the default."
+                    + (("\nCatalogue notice: " + error[:260] + "; using cached catalogue data.")
+                       if cached and error else "")
                 )
+                self._activity.finish(not cached)
         except queue.Empty:
             pass
         if not self._closed:
@@ -554,6 +660,7 @@ class CopernicusSettings:
     def close(self):
         self._closed = True
         self._generation += 1
+        self._activity.close()
         if self._after_id is not None:
             try:
                 self.frame.after_cancel(self._after_id)

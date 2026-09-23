@@ -39,9 +39,9 @@ class DisplayTimeTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_time_zone(value)
 
-    def test_legacy_configuration_gets_display_section_when_saved(self):
-        legacy = "[windows]\nposition = \"fit\"\n"
-        updated = app.ensure_display_configuration_section(legacy)
+    def test_configuration_without_display_section_gets_one_when_saved(self):
+        existing = "[windows]\nposition = \"fit\"\n"
+        updated = app.ensure_display_configuration_section(existing)
         updated = app.replace_toml_values(updated, (("display", "time_zone", "utc"),))
         self.assertEqual(tomllib.loads(updated)["display"]["time_zone"], "utc")
 

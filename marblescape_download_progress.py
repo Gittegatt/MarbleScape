@@ -65,6 +65,15 @@ class DownloadProgressTracker:
             self._samples.append((now, 0))
             return self._generation
 
+    def restart_attempt(self, expected_requests=None):
+        """Reset partial-byte accounting without losing a pending cancellation."""
+        with self._lock:
+            if not self._active:
+                raise RuntimeError("No active download to retry.")
+            if self._cancel_requested:
+                raise DownloadCancelledError("Download cancelled by user.")
+            return self.begin(expected_requests)
+
     def request_cancel(self):
         """Request cancellation and close active responses to unblock reads."""
         with self._lock:

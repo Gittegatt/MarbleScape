@@ -75,7 +75,6 @@ class ImageSnapshotValidationTests(unittest.TestCase):
             ("view", "fit_mode", "invalid"),
             ("view", "projection", "unknown projection"),
             ("view", "preset", "unknown preset"),
-            ("view", "show_extended_projections", "false"),
             ("view", "truecolor_black_night", 1),
             ("view", "bbox", [0, 0, float("inf"), 10]),
             ("view", "bbox", [10, 0, 0, 10]),

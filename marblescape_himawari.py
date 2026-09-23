@@ -342,7 +342,8 @@ class HimawariClient:
             "Cache-Control": "no-cache",
         })
         try:
-            with urllib.request.build_opener(_Redirects()).open(request, timeout=self.timeout) as response:
+            timeout = self.timeout if track else min(self.timeout, 20.0)
+            with urllib.request.build_opener(_Redirects()).open(request, timeout=timeout) as response:
                 _checked_url(response.geturl())
                 try:
                     body = read_response(response, limit, track=track)
@@ -381,7 +382,15 @@ class HimawariClient:
         with self._lock:
             if not refresh:
                 return copy.deepcopy(self._areas)
-        return self._coordinated(("areas",), self._refresh_areas)
+        try:
+            return self._coordinated(("areas",), self._refresh_areas)
+        except HimawariError as exc:
+            # NICT and the static JMA area list remain useful during a JMA
+            # catalogue outage; report the fallback instead of blocking them.
+            with self._lock:
+                self.catalogue_warning = "Using the last known Himawari areas: " + str(exc)
+                self._areas_time = time.monotonic()
+                return copy.deepcopy(self._areas)
 
     def _refresh_areas(self):
         html = self._html(JMA_BASE + "sat_img.php?area=fd_")
@@ -398,6 +407,7 @@ class HimawariClient:
         with self._lock:
             self._areas = copy.deepcopy(areas)
             self._areas_time = time.monotonic()
+            self.catalogue_warning = ""
         return copy.deepcopy(areas)
 
     def _area(self, area_id):
@@ -578,18 +588,28 @@ class HimawariClient:
             except HimawariError as exc:
                 areas = _static_areas()
                 errors.append("areas: " + str(exc))
+            with self._lock:
+                area_warning = self.catalogue_warning
+            if area_warning:
+                errors.append("areas: " + area_warning)
+            jma_unreachable = "currently unreachable" in area_warning
             families = ("standard", "heavy", "high_rainfall", "target", "position")
             products_count = resolution_count = 0
             for done, family in enumerate(families, 1):
                 self._progress(done + 1, 7, "Loading JMA " + family + " products...", progress)
                 area = next(value for value in areas if value.get("family") == family)
                 try:
-                    products = self.list_products(
-                        PROVIDER, area["id"], refresh=refresh or family not in self._products
-                    )
+                    if jma_unreachable:
+                        products = self._jma_fallback_products(area)
+                    else:
+                        products = self.list_products(
+                            PROVIDER, area["id"], refresh=refresh or family not in self._products
+                        )
                 except HimawariError as exc:
                     products = self._jma_fallback_products(area)
                     errors.append(family + ": " + str(exc))
+                    if isinstance(exc, UnavailableError) and "currently unreachable" in str(exc):
+                        jma_unreachable = True
                 family_areas = [value for value in areas if value.get("family") == family]
                 products_count += len(products) * len(family_areas)
                 resolution_count += sum(len(value["resolutions"]) for value in products) * len(family_areas)

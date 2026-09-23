@@ -66,7 +66,7 @@ GISCO_MAX_NATIVE_ZOOM = 18
 NETWORK_ATTEMPTS = 3
 SUPPORTED_MAP_ZOOMS = tuple(range(3, 26))
 COVERAGE_MODES = ("single", "black", "fill_gaps")
-LOOKBACK_DAYS = (3, 7, 14, 30, 45, 60, 90)
+LOOKBACK_DAYS = (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 730)
 DATA_TYPE_ZOOM_RANGES = {
     "sentinel-1-grd": (7, 18),
     "sentinel-2-l1c": (10, 18),
@@ -96,6 +96,7 @@ DEFAULT_PROFILE = {
     "map_labels": True,
     "coverage_mode": "fill_gaps",
     "lookback_days": 14,
+    "max_cloud_cover": 30,
 }
 
 _CATALOGUE = None
@@ -225,9 +226,6 @@ def normalize_profile(profile):
         profile = {}
     if not isinstance(profile, dict):
         raise ValueError("[sources.copernicus] must be a table.")
-    legacy_coverage = "coverage_mode" not in profile and "black_nodata" in profile
-    if "black_nodata" in profile and type(profile["black_nodata"]) is not bool:
-        raise ValueError("Copernicus black_nodata must be true or false.")
     result = dict(DEFAULT_PROFILE)
     result.update({key: profile[key] for key in DEFAULT_PROFILE if key in profile})
 
@@ -282,15 +280,17 @@ def normalize_profile(profile):
     for key in ("map_labels",):
         if type(result[key]) is not bool:
             raise ValueError(f"Copernicus {key} must be true or false.")
-    if legacy_coverage:
-        result["coverage_mode"] = "black" if profile["black_nodata"] else "single"
     if result["coverage_mode"] not in COVERAGE_MODES:
         raise ValueError("Copernicus coverage mode is invalid.")
     if type(result["lookback_days"]) is not int or result["lookback_days"] not in LOOKBACK_DAYS:
         raise ValueError(
-            "Copernicus maximum lookback must be 3, 7, 14, 30, 45, 60, or 90 days."
+            "Copernicus maximum lookback must be one of: "
+            + ", ".join(str(days) for days in LOOKBACK_DAYS) + " days."
         )
-    result.pop("black_nodata", None)
+    if (type(result["max_cloud_cover"]) is not int
+            or not 0 <= result["max_cloud_cover"] <= 100
+            or result["max_cloud_cover"] % 5):
+        raise ValueError("Copernicus maximum cloud cover must be 0-100% in 5% steps.")
     return result
 
 
@@ -446,8 +446,15 @@ def geographic_bbox(profile, width, height):
     return [west, lat(bottom), east, lat(top)]
 
 
-def _catalog_filter(layer):
-    values = layer.get("data_filter", {})
+def supports_cloud_filter(layer):
+    """Only collections advertising this Process filter expose cloud control."""
+    return "maxCloudCoverage" in layer.get("data_filter", {})
+
+
+def _catalog_filter(layer, max_cloud_cover=None):
+    values = dict(layer.get("data_filter", {}))
+    if max_cloud_cover is not None and supports_cloud_filter(layer):
+        values["maxCloudCoverage"] = max_cloud_cover
     clauses = []
     mapping = {
         "acquisitionMode": "sar:instrument_mode",
@@ -574,12 +581,15 @@ def _decode_vector_tile_lines(data):
 
 class CopernicusClient:
     def __init__(self, client_id="", client_secret="", timeout=90,
-                 user_agent="MarbleScape", opener=None):
+                 user_agent="MarbleScape", opener=None, network_attempts=NETWORK_ATTEMPTS):
         self.client_id = str(client_id).strip()
         self.client_secret = str(client_secret)
         self.timeout = float(timeout)
         self.user_agent = str(user_agent)
         self._opener = opener or _verified_urlopen
+        if type(network_attempts) is not int or not 1 <= network_attempts <= 10:
+            raise ValueError("Copernicus network attempts must be between 1 and 10.")
+        self.network_attempts = network_attempts
         self._token = ""
         self._token_deadline = 0.0
         self._token_lock = threading.Lock()
@@ -626,7 +636,7 @@ class CopernicusClient:
             if urllib.parse.urlparse(request_url).hostname == "gisco-services.ec.europa.eu"
             else "Copernicus service"
         )
-        for attempt in range(NETWORK_ATTEMPTS):
+        for attempt in range(self.network_attempts):
             if track:
                 DOWNLOAD_PROGRESS.raise_if_cancelled()
             try:
@@ -634,7 +644,7 @@ class CopernicusClient:
                     return self._read_response(response, maximum, track=track), response.headers.get("Content-Type", "")
             except urllib.error.HTTPError as exc:
                 retryable = exc.code in {408, 425, 429, 500, 502, 503, 504}
-                if retryable and attempt + 1 < NETWORK_ATTEMPTS:
+                if retryable and attempt + 1 < self.network_attempts:
                     retry_after = exc.headers.get("Retry-After") if exc.headers else None
                     try:
                         delay = min(10.0, max(0.0, float(retry_after)))
@@ -650,7 +660,7 @@ class CopernicusClient:
                 exc.close()
                 raise error from exc
             except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
-                if attempt + 1 < NETWORK_ATTEMPTS:
+                if attempt + 1 < self.network_attempts:
                     delay = 0.5 * (2 ** attempt)
                     if track:
                         DOWNLOAD_PROGRESS.wait_or_raise(delay)
@@ -659,7 +669,7 @@ class CopernicusClient:
                     continue
                 reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
                 raise RuntimeError(
-                    f"{service} network request failed after {NETWORK_ATTEMPTS} attempts: {reason}"
+                    f"{service} network request failed after {self.network_attempts} attempts: {reason}"
                 ) from exc
 
     def access_token(self):
@@ -729,7 +739,7 @@ class CopernicusClient:
             "collections": [layer["data_type"]],
             "limit": int(limit),
         }
-        query_filter = _catalog_filter(layer)
+        query_filter = _catalog_filter(layer, profile["max_cloud_cover"])
         if query_filter:
             payload["filter"] = query_filter
         return payload
@@ -757,7 +767,14 @@ class CopernicusClient:
                     acquisition = max(candidates)
                     break
             if acquisition is None:
-                raise RuntimeError("No Copernicus image is available for this location and product.")
+                cloud_limit = (
+                    f" with at most {profile['max_cloud_cover']}% cloud cover per satellite tile"
+                    if supports_cloud_filter(layer) else ""
+                )
+                raise RuntimeError(
+                    "No Copernicus acquisition is available for this location and product"
+                    + cloud_limit + ". Try a higher cloud limit or another location."
+                )
             selected_date = acquisition.date().isoformat()
             # ``distinct: date`` deliberately returns day strings. Resolve the
             # newest feature time inside that day for an accurate latest-frame
@@ -877,6 +894,8 @@ class CopernicusClient:
             )
         layer = frame["layer"]
         data_filter = dict(layer.get("data_filter", {}))
+        if supports_cloud_filter(layer):
+            data_filter["maxCloudCoverage"] = frame["profile"]["max_cloud_cover"]
         processing = dict(layer.get("processing", {}))
         if layer["data_type"] != "dem":
             selected_date = frame["date"]
@@ -1080,7 +1099,7 @@ class CopernicusClient:
         self.last_render_warnings = []
         satellite, downloaded = self._render_satellite(frame)
         profile = frame["profile"]
-        black_nodata = profile["coverage_mode"] == "black"
+        fill_missing_with_black = profile["coverage_mode"] == "black"
         map_service_available = True
 
         def optional_map_overlay(template):
@@ -1101,7 +1120,7 @@ class CopernicusClient:
             downloaded += size
             return overlay
 
-        if black_nodata:
+        if fill_missing_with_black:
             result = Image.new("RGBA", satellite.size, (0, 0, 0, 255))
             used_map_tiles = False
         else:

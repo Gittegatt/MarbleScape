@@ -24,9 +24,23 @@ _SOURCE_LABELS = {"eumetsat": "EUMETSAT", "goes_east": "GOES-East",
 _PRESET_LABELS = {"full_earth": "Full Earth", "europe": "Europe",
                   "mediterranean": "Mediterranean", "central_europe": "Central Europe",
                   "custom": "Custom"}
+PROFILE_LIST_COLUMNS = (
+    "name", "source", "selection", "time", "location", "latitude", "longitude",
+    "coverage",
+)
+PROFILE_LIST_COLUMN_LABELS = {
+    "name": "Profile name",
+    "source": "Source",
+    "selection": "Selection",
+    "time": "Time",
+    "location": "Area / location",
+    "latitude": "Lat",
+    "longitude": "Long",
+    "coverage": "Coverage mode",
+}
 
 
-def _text(value, fallback="—"):
+def _text(value, fallback="-"):
     return str(value).strip() if value is not None and str(value).strip() else fallback
 
 
@@ -82,8 +96,66 @@ def _profile_selection(settings):
     preset = _PRESET_LABELS.get(settings.get("view", {}).get("preset"),
                                 _text(settings.get("view", {}).get("preset")))
     layers = _enabled_wms_layers(settings)
-    layer = _text(layers[0].get("name")) if layers else "—"
+    layer = _text(layers[0].get("name")) if layers else "-"
     return f"{preset} · {layer}"
+
+
+def _profile_location(settings):
+    provider = settings.get("source", {}).get("provider", "eumetsat")
+    profile = settings.get("sources", {}).get(provider, {})
+    if provider == "copernicus":
+        highlight_id = profile.get("highlight")
+        if highlight_id:
+            highlight = get_highlight(profile.get("configuration", ""), highlight_id)
+            if highlight:
+                return _text(highlight.get("name"))
+        return "Custom Lat/Long"
+    if provider == "eumetsat":
+        view = settings.get("view", {})
+        preset_id = view.get("preset")
+        if preset_id == "custom" and isinstance(view.get("bbox"), (list, tuple)):
+            return "Custom area · " + ", ".join(_format_number(value) for value in view["bbox"])
+        return _PRESET_LABELS.get(preset_id, _text(preset_id))
+    if provider == "slider":
+        satellite, separator, sector = str(profile.get("area", "")).partition("---")
+        return f"{_text(satellite)} · {_text(sector)}" if separator else _text(profile.get("area"))
+    if provider == "worldview":
+        return "Global"
+    if provider == "solar":
+        return _text(profile.get("area"), "Sun")
+    return _text(profile.get("area"))
+
+
+def _profile_latitude(settings):
+    provider = settings.get("source", {}).get("provider", "eumetsat")
+    if provider != "copernicus":
+        return "-"
+    profile = settings.get("sources", {}).get(provider, {})
+    return _format_coordinate(profile.get("latitude"))
+
+
+def _profile_longitude(settings):
+    provider = settings.get("source", {}).get("provider", "eumetsat")
+    if provider != "copernicus":
+        return "-"
+    profile = settings.get("sources", {}).get(provider, {})
+    return _format_coordinate(profile.get("longitude"))
+
+
+def _profile_coverage(settings):
+    provider = settings.get("source", {}).get("provider", "eumetsat")
+    profile = settings.get("sources", {}).get(provider, {})
+    if provider == "copernicus":
+        mode = profile.get("coverage_mode", "fill_gaps")
+        if mode == "single":
+            return "Single latest acquisition"
+        if mode == "black":
+            return "No-data areas black"
+        if mode == "fill_gaps":
+            return f"Gap fill · {_text(profile.get('lookback_days', 14))} days"
+    elif provider == "eumetsat" and profile.get("fill_gaps"):
+        return f"Gap fill · {_text(profile.get('gap_fill_lookback_hours', 12))} h"
+    return "-"
 
 
 def _fixed_profile_date(settings):
@@ -135,12 +207,22 @@ def _format_number(value):
     return f"{number:g}" if math.isfinite(number) else _text(value)
 
 
+def _format_coordinate(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return _text(value)
+    if not math.isfinite(number):
+        return _text(value)
+    return f"{number:.8f}".rstrip("0").rstrip(".")
+
+
 def _output_resolution(settings):
     output = settings.get("output", {})
     width = output.get("width")
     height = output.get("height")
     if width in (None, ""):
-        return "—"
+        return "-"
     if height not in (None, "", 0, "0"):
         return f"{width} × {height}"
     ratio_text = _text(output.get("aspect_ratio"), "auto")
@@ -181,7 +263,7 @@ def _cache_status(metadata, time_zone="system"):
 
 class ProfilesSettings:
     def __init__(self, parent, library, capture_settings, on_load,
-                 on_apply=None, status=None):
+                 on_apply=None, status=None, visible_columns=None):
         self._library = normalize_library(library)
         self._capture_settings = capture_settings
         self._on_load = on_load
@@ -190,7 +272,7 @@ class ProfilesSettings:
         self._closed = False
         self._after_id = None
         self._runtime = {"active_profile_id": None, "profiles": {},
-                         "wallpaper_position": "—", "display_time_zone": "system"}
+                         "wallpaper_position": "-", "display_time_zone": "system"}
         by_id = {item["id"]: item for item in self._library["items"]}
         order = self._library["rotation"]["order"]
         self._items = [by_id[identifier] for identifier in order]
@@ -205,7 +287,7 @@ class ProfilesSettings:
         self.unit_var = tk.StringVar(master=self.frame, value=rotation["unit"])
         self.status_var = tk.StringVar(master=self.frame)
         self.detail_vars = {
-            key: tk.StringVar(master=self.frame, value="—")
+            key: tk.StringVar(master=self.frame, value="-")
             for key in ("configuration", "highlight", "area", "product", "source_resolution",
                         "output_resolution", "fit_zoom", "wallpaper_position", "time_utc", "cache")
         }
@@ -214,23 +296,49 @@ class ProfilesSettings:
         list_frame = ttk.Frame(self.frame)
         list_frame.grid(row=1, column=0, sticky="nsew")
         list_frame.columnconfigure(0, weight=1)
-        self.tree = ttk.Treeview(list_frame, columns=("name", "source", "selection", "time"), show="headings",
+        list_frame.rowconfigure(0, weight=1)
+        self.tree = ttk.Treeview(list_frame, columns=PROFILE_LIST_COLUMNS, show="headings",
                                  selectmode="browse", height=7)
-        self.tree.heading("name", text="Profile name")
-        self.tree.heading("source", text="Source")
-        self.tree.heading("selection", text="Selection")
-        self.tree.heading("time", text="Time")
+        for column in PROFILE_LIST_COLUMNS:
+            self.tree.heading(column, text=PROFILE_LIST_COLUMN_LABELS[column])
         self.tree.column("name", width=150, minwidth=100, stretch=True)
         self.tree.column("source", width=95, minwidth=75, stretch=True)
         self.tree.column("selection", width=205, minwidth=130, stretch=True)
         self.tree.column("time", width=175, minwidth=145, stretch=True)
+        self.tree.column("location", width=150, minwidth=100, stretch=True)
+        self.tree.column("latitude", width=90, minwidth=70, stretch=False)
+        self.tree.column("longitude", width=90, minwidth=70, stretch=False)
+        self.tree.column("coverage", width=170, minwidth=130, stretch=True)
         self.tree.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         horizontal = ttk.Scrollbar(list_frame, orient="horizontal", command=self.tree.xview)
         horizontal.grid(row=1, column=0, sticky="ew")
         self.tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=horizontal.set)
+        self._visible_columns = self._normalize_visible_columns(visible_columns)
+        self.tree.configure(displaycolumns=self._visible_columns)
+        self._column_visibility_vars = {
+            column: tk.BooleanVar(master=self.frame, value=column in self._visible_columns)
+            for column in PROFILE_LIST_COLUMNS
+        }
+        self._column_menu = tk.Menu(self.tree, tearoff=False)
+        for column in PROFILE_LIST_COLUMNS:
+            self._column_menu.add_checkbutton(
+                label=PROFILE_LIST_COLUMN_LABELS[column],
+                variable=self._column_visibility_vars[column],
+                command=lambda selected=column: self._toggle_column(selected),
+            )
+        self._cell_menu = tk.Menu(self.tree, tearoff=False)
+        self._cell_menu.add_command(label="Copy cell", command=self._copy_context_cell)
+        self._cell_menu.add_command(label="Copy row", command=self._copy_selected_row)
+        self._context_item = None
+        self._context_column = None
+        list_frame.configure(width=650, height=self.tree.winfo_reqheight() + horizontal.winfo_reqheight())
+        list_frame.grid_propagate(False)
         self.tree.bind("<<TreeviewSelect>>", self._selection_changed)
+        self.tree.bind("<Button-3>", self._show_tree_menu)
+        self.tree.bind("<Control-c>", self._copy_selected_row)
+        self.tree.bind("<Control-C>", self._copy_selected_row)
 
         details = ttk.LabelFrame(self.frame, text="Selected profile details", padding=7)
         details.grid(row=2, column=0, sticky="ew", pady=(7, 0))
@@ -296,12 +404,15 @@ class ProfilesSettings:
         ttk.Combobox(rotation_frame, textvariable=self.unit_var, values=("minutes", "days", "weeks"),
                      state="readonly", width=10).grid(row=1, column=2, sticky="w")
         ttk.Label(rotation_frame, text=(
-            "Three attempts per profile, then skip. Restart begins with the first profile.\n"
+            "Failed profile updates follow Download > Retries, then skip. "
+            "Restart begins with the first profile.\n"
             "Enable General > Set wallpaper automatically to update the desktop."
         ), wraplength=620, justify="left").grid(row=2, column=0, columnspan=3, sticky="w", pady=(6, 0))
         self.hint = ttk.Label(self.frame, text=(
-            "Apply saves profiles and rotation. Load copies a profile to the Image tab; "
-            "Apply loads its picture."), wraplength=650, justify="left")
+            "Right-click table cells to copy them or their row; right-click headings to "
+            "show or hide columns. Apply saves profiles, rotation, and column visibility. "
+            "Load copies a profile to the Image tab; Apply loads its picture."
+        ), wraplength=650, justify="left")
         self.hint.grid(row=6, column=0, sticky="ew", pady=(0, 6))
         self.status_label = ttk.Label(self.frame, textvariable=self.status_var, wraplength=650, justify="left")
         self.status_label.grid(row=7, column=0, sticky="ew")
@@ -310,6 +421,74 @@ class ProfilesSettings:
         self._refresh(self._items[0]["id"] if self._items else None)
         if status is not None:
             self._poll_status()
+
+    @staticmethod
+    def _normalize_visible_columns(columns):
+        if columns is None:
+            return PROFILE_LIST_COLUMNS
+        if not isinstance(columns, (list, tuple)):
+            raise ValueError("Profile list columns must be a list.")
+        result = tuple(column for column in PROFILE_LIST_COLUMNS if column in columns)
+        if not result:
+            return ("name",)
+        return result
+
+    def get_visible_columns(self):
+        return self._visible_columns
+
+    def _toggle_column(self, column):
+        visible = bool(self._column_visibility_vars[column].get())
+        selected = set(self._visible_columns)
+        if visible:
+            selected.add(column)
+        elif len(selected) > 1:
+            selected.discard(column)
+        else:
+            self._column_visibility_vars[column].set(True)
+            self.tree.bell()
+            return
+        self._visible_columns = tuple(
+            candidate for candidate in PROFILE_LIST_COLUMNS if candidate in selected
+        )
+        self.tree.configure(displaycolumns=self._visible_columns)
+
+    def _show_tree_menu(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            self._column_menu.tk_popup(event.x_root, event.y_root)
+            return "break"
+        item = self.tree.identify_row(event.y)
+        display_column = self.tree.identify_column(event.x)
+        if region not in {"cell", "tree"} or not item or not display_column:
+            return None
+        index = int(display_column[1:]) - 1
+        if not 0 <= index < len(self._visible_columns):
+            return None
+        self._context_item = item
+        self._context_column = self._visible_columns[index]
+        self.tree.selection_set(item)
+        self.tree.focus(item)
+        self._cell_menu.tk_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _copy_to_clipboard(self, value):
+        self.frame.clipboard_clear()
+        self.frame.clipboard_append(str(value))
+        self.frame.update_idletasks()
+
+    def _copy_context_cell(self):
+        if self._context_item and self._context_column:
+            self._copy_to_clipboard(
+                self.tree.set(self._context_item, self._context_column)
+            )
+
+    def _copy_selected_row(self, _event=None):
+        selection = self.tree.selection()
+        if not selection:
+            return None
+        values = self.tree.item(selection[0], "values")
+        self._copy_to_clipboard("\t".join(str(value) for value in values))
+        return "break"
 
     def _resize_text(self, event):
         if event.widget is self.frame:
@@ -331,7 +510,8 @@ class ProfilesSettings:
         return (name, _SOURCE_LABELS.get(provider, provider),
                 _profile_selection(settings), _profile_time(
                     settings, metadata, self._runtime.get("display_time_zone", "system")
-                ))
+                ), _profile_location(settings), _profile_latitude(settings),
+                _profile_longitude(settings), _profile_coverage(settings))
 
     def _detail_values(self, item):
         settings = item["settings"]
@@ -345,27 +525,27 @@ class ProfilesSettings:
             source_resolution = f"Map zoom {_text(profile.get('map_zoom'))}"
             fit_zoom = f"Map extent · zoom {_text(profile.get('map_zoom'))}"
         elif provider in {"goes_east", "goes_west"}:
-            configuration, highlight = "NOAA STAR", "—"
+            configuration, highlight = "NOAA STAR", "-"
             location = _text(profile.get("area"))
             product = _text(profile.get("product"))
-            layer = "—"
+            layer = "-"
             source_resolution = _source_resolution(profile.get("resolution"))
             fit_zoom = f"{_text(view.get('fit_mode'))} · {_format_number(view.get('zoom'))}x"
         elif provider == "solar":
-            configuration, highlight = "NOAA STAR SUVI", "—"
+            configuration, highlight = "NOAA STAR SUVI", "-"
             location = _text(profile.get("area"), "Sun")
             product = _text(profile.get("product"))
-            layer = "—"
+            layer = "-"
             source_resolution = _source_resolution(profile.get("resolution"))
             fit_zoom = f"{_text(view.get('fit_mode'))} · {_format_number(view.get('zoom'))}x"
         elif provider == "himawari":
             area_id = str(profile.get("area", ""))
             configuration = ("NICT Himawari Viewer" if area_id.startswith("nict_")
                              else "JMA Himawari Real-Time Image")
-            highlight = "—"
+            highlight = "-"
             location = _text(profile.get("area"))
             product = _text(profile.get("product"))
-            layer = "—"
+            layer = "-"
             source_resolution = _source_resolution(profile.get("resolution"))
             fit_zoom = f"{_text(view.get('fit_mode'))} · {_format_number(view.get('zoom'))}x"
         elif provider == "slider":
@@ -375,7 +555,7 @@ class ProfilesSettings:
             location = (f"{_text(satellite)} · {_text(sector)}" if separator
                         else _text(area_id))
             product = _text(profile.get("product"))
-            layer = "—"
+            layer = "-"
             source_resolution = _source_resolution(profile.get("resolution"))
             fit_zoom = f"{_text(view.get('fit_mode'))} · {_format_number(view.get('zoom'))}x"
         elif provider == "worldview":
@@ -393,7 +573,7 @@ class ProfilesSettings:
             theme = _EUMETSAT_THEME_LABELS.get(
                 profile.get("theme"), _text(profile.get("theme"))
             )
-            configuration = f"EUMETView · {theme} · {preset}"
+            configuration = f"EUMETSAT Viewer · {theme} · {preset}"
             if profile.get("fill_gaps"):
                 configuration += (
                     " · Gap fill "
@@ -409,7 +589,7 @@ class ProfilesSettings:
                 location = preset
             layers = _enabled_wms_layers(settings)
             product = _text(profile.get("product_type"))
-            layer = ", ".join(_text(entry.get("name")) for entry in layers) or "—"
+            layer = ", ".join(_text(entry.get("name")) for entry in layers) or "-"
             render_scale = output.get("render_scale", "auto")
             source_resolution = f"WMS render scale {_text(render_scale)}"
             fit_zoom = f"{_text(view.get('fit_mode'))} · {_format_number(view.get('zoom'))}x"
@@ -447,7 +627,7 @@ class ProfilesSettings:
                 item = self._items[self._selected_index()]
             except (ValueError, StopIteration):
                 item = None
-        values = ({key: "—" for key in self.detail_vars} if item is None
+        values = ({key: "-" for key in self.detail_vars} if item is None
                   else self._detail_values(item))
         for key, variable in self.detail_vars.items():
             variable.set(values[key])
@@ -609,7 +789,7 @@ class ProfilesSettings:
         runtime = {
             "active_profile_id": status.get("active_profile_id"),
             "profiles": status.get("profiles", {}) if isinstance(status.get("profiles", {}), dict) else {},
-            "wallpaper_position": status.get("wallpaper_position", "—"),
+            "wallpaper_position": status.get("wallpaper_position", "-"),
             "display_time_zone": status.get("display_time_zone", "system"),
         }
         if runtime == self._runtime:

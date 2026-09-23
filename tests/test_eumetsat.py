@@ -1,4 +1,4 @@
-"""EUMETView catalogue normalization tests without live network access."""
+"""EUMETSAT catalogue normalization tests without live network access."""
 
 import unittest
 
@@ -7,6 +7,7 @@ from marblescape_eumetsat import (
     DEFAULT_PROFILE,
     EumetsatCatalogueError,
     EumetsatSettings,
+    _preferred,
     build_catalogue,
     normalize_profile,
     supports_gap_fill,
@@ -14,6 +15,15 @@ from marblescape_eumetsat import (
 
 
 class EumetsatCatalogueTests(unittest.TestCase):
+    def test_natural_color_selection_handles_spaced_names_and_preserves_saved_layer(self):
+        products = [
+            {"label": "Vegetation index", "layer": "example:ndvi"},
+            {"label": "Natural Colour RGB", "layer": "example:natural"},
+            {"label": "True Colour RGB", "layer": "example:true"},
+        ]
+        self.assertEqual(_preferred(products)["layer"], "example:true")
+        self.assertEqual(_preferred(products, "example:ndvi")["layer"], "example:ndvi")
+
     def test_official_product_metadata_builds_dependent_choices_and_themes(self):
         decorations = {
             "EO:EUM:DAT:TEST": {"wmsConfig": {"layer": "mtg_fd:rgb_geocolour"}},

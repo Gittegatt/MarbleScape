@@ -4,10 +4,12 @@ from copy import deepcopy
 import queue
 import re
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 
 from marblescape_catalogues import CatalogueClient
+from marblescape_catalogue_activity import CatalogueActivity
 from marblescape_noaa import NOAAClient
 from marblescape_copernicus import DEFAULT_PROFILE as DEFAULT_COPERNICUS_PROFILE, normalize_profile as normalize_copernicus_profile
 from marblescape_copernicus_settings import CopernicusSettings
@@ -29,6 +31,22 @@ PROVIDER_LABELS = {
     "copernicus": "Copernicus Browser",
     "worldview": "NASA Worldview",
 }
+GOES_SATELLITES = {"goes_east": "GOES-East", "goes_west": "GOES-West"}
+IMAGE_SOURCE_CHOICES = {
+    "eumetsat": "EUMETSAT",
+    "goes": "NOAA GOES",
+    "solar": "Solar / Sun (SUVI)",
+    "himawari": "Himawari",
+    "slider": "CIRA SLIDER",
+    "copernicus": "Copernicus Browser",
+    "worldview": "NASA Worldview",
+}
+
+
+def image_source_label(provider):
+    return IMAGE_SOURCE_CHOICES["goes"] if provider in GOES_SATELLITES else IMAGE_SOURCE_CHOICES[provider]
+
+
 DEFAULT_PROFILES = {
     "eumetsat": dict(DEFAULT_EUMETSAT_PROFILE),
     "goes_east": {"area": "full_disk", "product": "GEOCOLOR", "resolution": "auto"},
@@ -43,6 +61,18 @@ DEFAULT_PROFILES = {
 CATALOGUE_PROVIDERS = frozenset(
     ("goes_east", "goes_west", "solar", "himawari", "slider", "worldview")
 )
+
+
+def _natural_color_rank(item):
+    """Rank natural-looking imagery before thematic composites in a new selection."""
+    name = re.sub(r"[^a-z0-9]+", "", (str(item.get("label", "")) + " " + str(item.get("id", ""))).casefold())
+    if "truecolorreproduction" in name:
+        return 0
+    if "truecolor" in name or "truecolour" in name or "geocolor" in name or "geocolour" in name:
+        return 1
+    if "naturalcolor" in name or "naturalcolour" in name:
+        return 2
+    return 3
 
 
 def _complete(profile, provider=None):
@@ -83,6 +113,7 @@ class SourceSettings:
         self.frame = ttk.LabelFrame(parent, text="Source", padding=8)
         self.frame.columnconfigure(1, weight=1)
         self._on_change = on_change
+        self._view_defaults_requested = False
         self._replace_profiles(profiles)
         self._provider = provider if provider in PROVIDER_LABELS else "eumetsat"
         self._client = client if client is not None else CatalogueClient(
@@ -112,7 +143,9 @@ class SourceSettings:
         self._product_by_label = {}
         self._resolution_by_label = {}
         self._loading = False
-        self._provider_var = tk.StringVar(self.frame, PROVIDER_LABELS[self._provider])
+        self._goes_provider = self._provider if self._provider in GOES_SATELLITES else "goes_east"
+        self._provider_var = tk.StringVar(self.frame, image_source_label(self._provider))
+        self._goes_var = tk.StringVar(self.frame, GOES_SATELLITES[self._goes_provider])
         self._category_var = tk.StringVar(self.frame)
         self._filter_var = tk.StringVar(self.frame)
         self._area_var = tk.StringVar(self.frame)
@@ -122,8 +155,12 @@ class SourceSettings:
         self._all_status_var = tk.StringVar(self.frame)
         self._all_progress_var = tk.DoubleVar(self.frame, 0)
         self._provider_combo, _ = self._combo(
-            0, "Image source", self._provider_var, list(PROVIDER_LABELS.values()))
+            0, "Image source", self._provider_var, tuple(IMAGE_SOURCE_CHOICES.values()))
         self._provider_combo.bind("<<ComboboxSelected>>", self._select_provider)
+        self._goes_combo, self._goes_label = self._combo(
+            1, "Satellite", self._goes_var, tuple(GOES_SATELLITES.values())
+        )
+        self._goes_combo.bind("<<ComboboxSelected>>", self._select_goes_satellite)
         # EUMETSAT owns a dependent catalogue; the host adds view controls below it.
         self.eumetsat_frame = ttk.Frame(self.frame)
         self.eumetsat_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
@@ -135,6 +172,7 @@ class SourceSettings:
             user_agent=user_agent,
             on_change=self._eumetsat_changed,
             client=getattr(self._client, "eumetsat", None),
+            auto_refresh=False,
         )
         if eumetsat_layer:
             self.eumetsat_settings.set_profile(
@@ -143,11 +181,7 @@ class SourceSettings:
         self.eumetsat_settings.frame.grid(
             row=0, column=0, columnspan=2, sticky="ew"
         )
-        self.eumetsat_view_frame = ttk.Frame(self.eumetsat_frame)
-        self.eumetsat_view_frame.grid(
-            row=1, column=0, columnspan=2, pady=(4, 0), sticky="ew"
-        )
-        self.eumetsat_view_frame.columnconfigure(1, weight=1)
+        self.eumetsat_view_frame = self.eumetsat_settings.view_frame
         self._category_combo, self._category_label = self._combo(
             2, "Area category", self._category_var)
         self._category_combo.bind("<<ComboboxSelected>>", self._select_category)
@@ -172,14 +206,19 @@ class SourceSettings:
                  "Desktop size is set below; Render quality controls EUMETSAT WMS supersampling.",
             wraplength=420, justify="left")
         self._resolution_hint.grid(row=8, column=1, pady=(0, 5), sticky="w")
+        self.generic_view_frame = ttk.Frame(self.frame)
+        self.generic_view_frame.grid(
+            row=9, column=0, columnspan=2, pady=(2, 0), sticky="ew"
+        )
+        self.generic_view_frame.columnconfigure(1, weight=1)
         self._slider_note = ttk.Label(
             self.frame,
             text="CIRA product tiles are loaded without map borders or latitude/longitude lines.",
             wraplength=570, justify="left",
         )
-        self._slider_note.grid(row=9, column=0, columnspan=2, pady=(0, 3), sticky="w")
+        self._slider_note.grid(row=10, column=0, columnspan=2, pady=(3, 3), sticky="w")
         self._actions = ttk.Frame(self.frame)
-        self._actions.grid(row=10, column=0, columnspan=2, pady=(5, 0), sticky="ew")
+        self._actions.grid(row=11, column=0, columnspan=2, pady=(5, 0), sticky="ew")
         self._actions.columnconfigure(1, weight=1)
         self._all_refresh_button = ttk.Button(self._actions, text="Refresh all catalogues", command=self._refresh_all)
         self._all_refresh_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
@@ -190,11 +229,31 @@ class SourceSettings:
         self._status_label = ttk.Label(self._actions, textvariable=self._status_var,
                                        wraplength=570, justify="left")
         self._status_label.grid(row=2, column=0, columnspan=2, pady=(4, 0), sticky="w")
+        self._catalogue_activity = CatalogueActivity(self._actions, row=3)
         self._all_status_label = ttk.Label(self._actions, textvariable=self._all_status_var,
                                            wraplength=570, justify="left")
-        self._all_status_label.grid(row=3, column=0, columnspan=2, pady=(4, 0), sticky="w")
-        self._all_progress = ttk.Progressbar(self._actions, variable=self._all_progress_var, maximum=100)
-        self._all_progress.grid(row=4, column=0, columnspan=2, pady=(4, 0), sticky="ew")
+        self._all_status_label.grid(row=4, column=0, columnspan=2, pady=(4, 0), sticky="w")
+        self._all_progress = ttk.Progressbar(self._actions, maximum=100, mode="indeterminate")
+        self._all_progress.grid(row=5, column=0, columnspan=2, pady=(4, 0), sticky="ew")
+        self._all_progress_running = False
+        self._all_completion_var = tk.StringVar(self._actions, value="")
+        ttk.Label(self._actions, textvariable=self._all_completion_var).grid(
+            row=6, column=0, columnspan=2, pady=(3, 0), sticky="w"
+        )
+        self._all_separator = ttk.Separator(self._actions, orient="horizontal")
+        self._all_separator.grid(
+            row=7, column=0, columnspan=2, pady=(6, 4), sticky="ew"
+        )
+        self._all_details_var = tk.StringVar(self._actions, value="")
+        self._all_details_label = ttk.Label(
+            self._actions, textvariable=self._all_details_var,
+            wraplength=570, justify="left",
+        )
+        self._all_details_label.grid(
+            row=8, column=0, columnspan=2, sticky="w"
+        )
+        self._all_separator.grid_remove()
+        self._all_details_label.grid_remove()
         self._all_progress.grid_remove()
         self._all_status_label.grid_remove()
         self._area_widgets = (self._category_label, self._category_combo,
@@ -212,6 +271,8 @@ class SourceSettings:
             user_agent=user_agent,
             output_size=output_size,
             on_change=self._copernicus_changed,
+            catalogue_client=self._client,
+            catalogue_retries=getattr(self._client, "retries", 2),
         )
         self.copernicus_settings.frame.grid(
             row=2, column=0, columnspan=2, sticky="ew"
@@ -252,7 +313,10 @@ class SourceSettings:
             return
         self._replace_profiles(profiles)
         self._provider = provider
-        self._provider_var.set(PROVIDER_LABELS[provider])
+        if provider in GOES_SATELLITES:
+            self._goes_provider = provider
+            self._goes_var.set(GOES_SATELLITES[provider])
+        self._provider_var.set(image_source_label(provider))
         self.eumetsat_settings.set_profile(self._profiles["eumetsat"])
         self._display_provider()
         if self._on_change:
@@ -261,6 +325,10 @@ class SourceSettings:
     @property
     def provider(self):
         return self._provider
+
+    @property
+    def view_defaults_requested(self):
+        return self._view_defaults_requested
 
     def _combo(self, row, text, variable, choices=()):
         label = ttk.Label(self.frame, text=text)
@@ -276,16 +344,40 @@ class SourceSettings:
 
     def _select_provider(self, _event=None):
         label = self._provider_var.get()
-        selected = next((key for key, value in PROVIDER_LABELS.items() if value == label), None)
+        selected = next((key for key, value in IMAGE_SOURCE_CHOICES.items() if value == label), None)
+        if selected == "goes":
+            selected = self._goes_provider
         if selected is None or selected == self._provider:
             return
         self._provider = selected
         self._display_provider()
         if self._on_change:
-            self._on_change(self._provider)
+            self._view_defaults_requested = True
+            try:
+                self._on_change(self._provider)
+            finally:
+                self._view_defaults_requested = False
+
+    def _select_goes_satellite(self, _event=None):
+        selected = next((key for key, value in GOES_SATELLITES.items()
+                         if value == self._goes_var.get()), None)
+        if selected is None:
+            return
+        self._goes_provider = selected
+        if self._provider not in GOES_SATELLITES or selected == self._provider:
+            return
+        self._provider = selected
+        self._display_provider()
+        if self._on_change:
+            self._view_defaults_requested = True
+            try:
+                self._on_change(selected)
+            finally:
+                self._view_defaults_requested = False
 
     def _display_provider(self):
         self._advance_generation()
+        self._catalogue_activity.finish(False)
         self._areas = []
         self._products = []
         self._area_by_label = {}
@@ -295,11 +387,16 @@ class SourceSettings:
         self._category_var.set("")
         is_catalogue = self._provider in CATALOGUE_PROVIDERS
         is_copernicus = self._provider == "copernicus"
+        self._set_visible((self._goes_label, self._goes_combo), self._provider in GOES_SATELLITES)
         self._set_visible((self.eumetsat_frame,), self._provider == "eumetsat")
         self._set_visible(self._area_widgets, is_catalogue and self._provider != "solar")
         self._set_visible(self._product_widgets, is_catalogue)
-        self._set_visible((self._actions,), is_catalogue)
+        self._set_visible((self._refresh_button, self._status_label), is_catalogue)
         self._set_visible((self._slider_note,), self._provider == "slider")
+        self._set_visible(
+            (self.generic_view_frame,),
+            is_catalogue and not is_copernicus,
+        )
         self._set_visible((self.copernicus_settings.frame,), is_copernicus)
         self._product_label.configure(
             text=("Channel" if self._provider == "solar" else
@@ -341,13 +438,20 @@ class SourceSettings:
         if is_copernicus:
             self._loading = False
             self.copernicus_settings.set_profile(self._profiles["copernicus"])
+            self.copernicus_settings.refresh_dates()
+            return
+        if self._provider == "eumetsat":
+            self._loading = False
+            status = getattr(self._client, "catalogue_refresh_status", {}) or {}
+            self.eumetsat_settings.refresh(not bool(status.get("running")))
             return
         if not is_catalogue:
             self._loading = False
             self._refresh_button.configure(state="disabled")
             return
         self._show_saved_profile()
-        self._load_areas()
+        status = getattr(self._client, "catalogue_refresh_status", {}) or {}
+        self._load_areas(refresh=not bool(status.get("running")))
 
     def _show_saved_profile(self):
         profile = self._profiles[self._provider]
@@ -375,6 +479,7 @@ class SourceSettings:
             message = (f"Loading {source} areas..." if kind == "areas"
                        else "Loading products and image sizes...")
         self._status_var.set(message)
+        self._catalogue_activity.start()
         self._refresh_button.configure(state="disabled", text="Refresh catalogue")
         client, client_lock, results = self._client, self._client_lock, self._results
         worker_state = self._worker_state
@@ -451,6 +556,8 @@ class SourceSettings:
         except queue.Empty:
             pass
         self._sync_global_refresh()
+        if self._all_progress_running and str(self._all_progress["mode"]) == "indeterminate":
+            self._all_progress.configure(value=(time.monotonic() * 35.0) % 100.0)
         try:
             while True:
                 generation, provider, kind, value, error, refresh = self._results.get_nowait()
@@ -474,6 +581,7 @@ class SourceSettings:
             self._after_id = self.frame.after(100, self._poll)
 
     def _show_error(self, error):
+        self._catalogue_activity.finish(False)
         suffix = (" Saved selection can still be used." if self._usable.get(self._provider)
                   else " Retry before saving this selection.")
         self._status_var.set("Source catalogue unavailable: " + str(error)[:180] + suffix)
@@ -507,9 +615,14 @@ class SourceSettings:
                       else " Select an available area before saving.")
             noun = "layer" if self._provider == "worldview" else "area"
             self._status_var.set(f"The selected {noun} is no longer listed by its provider." + suffix)
+            self._catalogue_activity.finish(False)
             self._refresh_button.configure(state="normal", text="Refresh catalogue")
             return
-        self._load_products(refresh=refresh)
+        self._catalogue_activity.set_progress(1, 2)
+        # CIRA and NASA publish areas and products in one catalogue document.
+        # The area request above already refreshed it; rereading it here can
+        # trigger a second slow network transfer for the same button click.
+        self._load_products(refresh=refresh and self._provider not in ("slider", "worldview"))
 
     def _filter_areas(self, *_args):
         if not self._areas:
@@ -543,9 +656,12 @@ class SourceSettings:
             for combo in (self._area_combo, self._product_combo, self._resolution_combo):
                 combo.configure(values=(), state="disabled")
             self._status_var.set("No areas are currently available in this category. Select another category or refresh the catalogue.")
+            self._catalogue_activity.finish(False)
             self._refresh_button.configure(state="normal")
             return
         label = next(iter(self._area_by_label))
+        if self._provider == "worldview":
+            label = min(self._area_by_label, key=lambda value: _natural_color_rank(self._area_by_label[value]))
         self._area_var.set(label)
         self._select_area()
 
@@ -573,12 +689,7 @@ class SourceSettings:
             preferred = DEFAULT_PROFILES[self._provider]["product"]
             selected = next(
                 (item for item in products if item["id"] == preferred),
-                next(
-                    (item for item in products
-                     if any(word in (item["id"] + " " + item["label"]).casefold()
-                            for word in ("geocolor", "geocolour", "true color", "true colour", "natural color", "natural colour"))),
-                    products[0],
-                ),
+                min(products, key=_natural_color_rank),
             )
             profile["resolution"] = "auto"
         profile["product"] = selected["id"]
@@ -634,10 +745,16 @@ class SourceSettings:
         else:
             status = ("Latest available still image is used. Automatic resolution chooses the "
                       "smallest available source size that avoids upscaling the configured output.")
-        catalogue_warning = str(getattr(self._client, "catalogue_warning", "") or "").strip()
+        warning_for = getattr(self._client, "catalogue_warning_for", None)
+        catalogue_warning = (
+            str(warning_for(self._provider) or "").strip()
+            if callable(warning_for)
+            else str(getattr(self._client, "catalogue_warning", "") or "").strip()
+        )
         if catalogue_warning:
             status += "\nCatalogue notice: " + catalogue_warning
         self._status_var.set(status)
+        self._catalogue_activity.finish(True)
         self._refresh_button.configure(state="normal", text="Refresh catalogue")
 
     def _select_resolution(self, _event=None):
@@ -665,7 +782,7 @@ class SourceSettings:
         self._profiles["eumetsat"] = deepcopy(profile)
         self._last_valid_profiles["eumetsat"] = deepcopy(profile)
         self._usable["eumetsat"] = True
-        if self._on_change:
+        if self._on_change and self._provider == "eumetsat":
             self._on_change("eumetsat")
 
     def select_eumetsat_layer(self, layer):
@@ -715,21 +832,53 @@ class SourceSettings:
         threading.Thread(target=worker, name="MarbleScape-catalogue-all", daemon=True).start()
 
     def _show_all_progress(self, done, total, message):
-        done, total = max(0, int(done)), max(0, int(total))
-        count = f" ({done}/{total})" if total else ""
+        if not self._all_progress_running:
+            self._all_completion_var.set("")
+            self._set_all_details("")
+            self._all_progress.configure(mode="indeterminate")
+            self._all_progress_running = True
+        done, total = max(0.0, float(done)), max(0, int(total))
+        count = f" ({min(total, int(done))}/{total})" if total else ""
         self._all_status_var.set(f"Refreshing all catalogues{count}: {message}")
         self._all_progress_var.set(min(100, 100 * done / total) if total else 0)
+        # An unknown step moves like the download indicator; a reported
+        # substep shows its real fraction of the five-source refresh.
+        fractional = done != int(done)
+        self._all_progress.configure(mode="determinate" if fractional else "indeterminate")
+        if fractional:
+            self._all_progress.configure(value=self._all_progress_var.get())
         self._all_status_label.grid()
         self._all_progress.grid()
+
+    def _stop_all_progress(self, success):
+        self._all_progress_running = False
+        self._all_progress.configure(
+            mode="determinate", value=100 if success else self._all_progress_var.get()
+        )
+        self._all_completion_var.set("Completed." if success else "Finished with issues.")
+
+    def _set_all_details(self, message):
+        message = str(message or "").strip()
+        self._all_details_var.set(message)
+        if message:
+            self._all_separator.grid()
+            self._all_details_label.grid()
+        else:
+            self._all_separator.grid_remove()
+            self._all_details_label.grid_remove()
 
     def _finish_all(self, summary, error):
         self._all_running = False
         self._global_refresh_seen_running = False
         self._all_refresh_button.configure(state="normal")
+        complete = False
+        details = ""
         if error:
-            message = "Unable to refresh all catalogues: " + str(error)
+            message = "Catalogue refresh could not be completed."
+            details = "Catalogue update finished with unavailable entries: " + str(error)
         else:
             summary = summary if isinstance(summary, dict) else {}
+            complete = bool(summary.get("complete"))
             counts = (f"{summary.get('providers', 0)} sources, {summary.get('areas', 0)} areas, "
                       f"{summary.get('products', 0)} products and {summary.get('resolution_options', 0)} size options")
             warning = str(summary.get("warning") or "").strip()
@@ -738,11 +887,13 @@ class SourceSettings:
             if summary.get("complete", not warning):
                 message = "All catalogues updated: " + counts + "."
             else:
-                message = "Catalogue update finished with unavailable entries: " + counts + "."
+                message = "Available catalogue data: " + counts + "."
             if warning:
-                message += "\n" + warning
+                details = "Catalogue update finished with unavailable entries:\n" + warning
             self._all_progress_var.set(100)
         self._all_status_var.set(message)
+        self._stop_all_progress(complete)
+        self._set_all_details(details)
         self._all_status_label.grid()
         self._all_progress.grid()
         if self._provider in CATALOGUE_PROVIDERS:
@@ -769,16 +920,25 @@ class SourceSettings:
             message = str(status.get("message") or "")
             error = str(status.get("error") or "")
             if error:
-                message = "Catalogue update finished with unavailable entries: " + error
-            elif was_running and not message:
-                message = "All catalogues updated."
+                self._set_all_details(
+                    "Catalogue update finished with unavailable entries:\n" + error
+                )
+                message = "Available catalogue data remains usable where cached."
+            else:
+                self._set_all_details("")
+                if was_running and not message:
+                    message = "All catalogues updated."
             if message:
                 self._all_status_var.set(message)
                 self._all_status_label.grid()
                 self._all_progress_var.set(100 if not error else self._all_progress_var.get())
                 self._all_progress.grid()
+            if was_running:
+                self._stop_all_progress(not error)
             if was_running and self._provider in CATALOGUE_PROVIDERS:
                 self._load_areas(refresh=False)
+            elif was_running and self._provider == "eumetsat":
+                self.eumetsat_settings.refresh(False)
 
     def get_selection(self):
         if self._provider == "eumetsat":
@@ -808,6 +968,9 @@ class SourceSettings:
 
     def close(self):
         self._closed = True
+        self._catalogue_activity.close()
+        if self._all_progress_running:
+            self._all_progress_running = False
         self._advance_generation()
         self.eumetsat_settings.close()
         self.copernicus_settings.close()

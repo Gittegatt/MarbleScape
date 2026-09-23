@@ -101,8 +101,9 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(value["latitude"], 52.0)
         self.assertEqual(value["coverage_mode"], "fill_gaps")
         self.assertEqual(value["lookback_days"], 14)
-        self.assertNotIn("black_nodata", value)
-        self.assertEqual(copernicus.LOOKBACK_DAYS, (3, 7, 14, 30, 45, 60, 90))
+        self.assertEqual(value["max_cloud_cover"], 30)
+        self.assertEqual(copernicus.LOOKBACK_DAYS,
+                         (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 730))
         for days in copernicus.LOOKBACK_DAYS:
             with self.subTest(lookback_days=days):
                 normalized = copernicus.normalize_profile({
@@ -112,21 +113,13 @@ class CatalogueTests(unittest.TestCase):
         for update in (
             {"mission": "Sentinel-1"}, {"product": "missing"}, {"layer": "missing"},
             {"date": "today"}, {"latitude": 90}, {"longitude": 181},
-            {"map_zoom": 7.0}, {"map_labels": 1}, {"black_nodata": 0},
+            {"map_zoom": 7.0}, {"map_labels": 1},
             {"coverage_mode": "missing"}, {"lookback_days": 5}, {"lookback_days": True},
+            {"max_cloud_cover": -5}, {"max_cloud_cover": 105},
+            {"max_cloud_cover": 33}, {"max_cloud_cover": True},
         ):
             with self.subTest(update=update), self.assertRaises(ValueError):
                 copernicus.normalize_profile({**copernicus.DEFAULT_PROFILE, **update})
-
-        legacy = {key: value for key, value in copernicus.DEFAULT_PROFILE.items()
-                  if key not in {"coverage_mode", "lookback_days"}}
-        self.assertEqual(
-            copernicus.normalize_profile({**legacy, "black_nodata": False})["coverage_mode"],
-            "single",
-        )
-        migrated_black = copernicus.normalize_profile({**legacy, "black_nodata": True})
-        self.assertEqual(migrated_black["coverage_mode"], "black")
-        self.assertNotIn("black_nodata", migrated_black)
 
     def test_default_matches_browser_sentinel_2_l2a_and_zoom_ranges(self):
         product = copernicus.get_product(
@@ -320,21 +313,42 @@ class ClientTests(unittest.TestCase):
             return responses.pop(0)
 
         client._json_request = request
-        frame = client.latest(copernicus.DEFAULT_PROFILE, (1920, 1080))
+        cloud_profile = {**copernicus.DEFAULT_PROFILE, "max_cloud_cover": 15}
+        frame = client.latest(cloud_profile, (1920, 1080))
         self.assertEqual(frame["date"], "2026-09-12")
         self.assertEqual(frame["timestamp"], "2026-09-12T10:40:30.123000Z")
         self.assertTrue(frame["latest"])
         self.assertEqual(payloads[0]["distinct"], "date")
         self.assertNotIn("distinct", payloads[1])
+        self.assertTrue(all("eo:cloud_cover<=15" in payload["filter"] for payload in payloads))
 
         responses.extend([
             {"features": ["2026-09-10", "2026-09-12"], "context": {"next": 2}},
             {"features": [{"properties": {"datetime": "2026-09-11T10:00:00Z"}}],
              "context": {}},
         ])
-        self.assertEqual(client.list_dates(copernicus.DEFAULT_PROFILE, (1920, 1080)),
+        self.assertEqual(client.list_dates(cloud_profile, (1920, 1080)),
                          ["2026-09-12", "2026-09-11", "2026-09-10"])
         self.assertEqual(payloads[-1]["next"], 2)
+        self.assertTrue(all("eo:cloud_cover<=15" in payload["filter"] for payload in payloads))
+        self.assertEqual(copernicus._catalog_filter({"data_filter": {}}, 15), "")
+
+    def test_zero_cloud_limit_reports_no_matching_acquisition_clearly(self):
+        client = copernicus.CopernicusClient("id", "secret")
+        payloads = []
+
+        def request(_url, payload):
+            payloads.append(payload)
+            return {"features": [], "context": {}}
+
+        client._json_request = request
+        profile = {**copernicus.DEFAULT_PROFILE, "latitude": 19.60508,
+                   "longitude": -155.43457, "map_zoom": 11,
+                   "lookback_days": 90, "max_cloud_cover": 0}
+        with self.assertRaisesRegex(RuntimeError, "at most 0% cloud cover"):
+            client.latest(profile, (1920, 1080))
+        self.assertTrue(payloads)
+        self.assertTrue(all("eo:cloud_cover<=0" in payload["filter"] for payload in payloads))
 
     def test_process_request_uses_gap_fill_window_rgba_evalscript_and_documented_size(self):
         requests = []
@@ -346,7 +360,8 @@ class ClientTests(unittest.TestCase):
         client = copernicus.CopernicusClient("id", "secret", timeout=17, opener=opener)
         client._token = "token"
         client._token_deadline = time.monotonic() + 60
-        profile = copernicus.normalize_profile({**copernicus.DEFAULT_PROFILE, "date": "2026-09-01"})
+        profile = copernicus.normalize_profile({**copernicus.DEFAULT_PROFILE,
+                                                "date": "2026-09-01", "max_cloud_cover": 15})
         frame = client.latest(profile, (3, 2))
         image, downloaded = client._process_tile(frame, [1, 2, 3, 4], 3, 2)
         self.assertEqual(image.size, (3, 2))
@@ -362,11 +377,12 @@ class ClientTests(unittest.TestCase):
             "from": "2026-08-19T00:00:00Z", "to": "2026-09-01T23:59:59Z"
         })
         self.assertEqual(data_filter["mosaickingOrder"], "mostRecent")
+        self.assertEqual(data_filter["maxCloudCoverage"], 15)
         self.assertIn("dataMask", payload["evalscript"])
 
         for mode in ("single", "black"):
             mode_profile = copernicus.normalize_profile({
-                **profile, "coverage_mode": mode, "black_nodata": mode == "black"
+                **profile, "coverage_mode": mode
             })
             mode_frame = client.latest(mode_profile, (3, 2))
             client._process_tile(mode_frame, [1, 2, 3, 4], 3, 2)
@@ -374,6 +390,7 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(mode_filter["timeRange"], {
                 "from": "2026-09-01T00:00:00Z", "to": "2026-09-01T23:59:59Z"
             })
+            self.assertEqual(mode_filter["maxCloudCoverage"], 15)
 
     def test_process_request_rejects_oversized_tile_before_network_access(self):
         client = copernicus.CopernicusClient(opener=mock.Mock())
@@ -497,7 +514,7 @@ class ClientTests(unittest.TestCase):
              mock.patch.object(client, "_map_overlay", side_effect=map_overlay) as overlay, \
              mock.patch.object(client, "_draw_attribution"):
             black_frame = {"profile": dict(copernicus.DEFAULT_PROFILE,
-                                             coverage_mode="black", black_nodata=True,
+                                             coverage_mode="black",
                                              map_labels=False)}
             black_png, black_downloaded = client.fetch_image(black_frame)
             self.assertEqual(overlay.call_count, 0)
@@ -507,7 +524,7 @@ class ClientTests(unittest.TestCase):
                 self.assertEqual(image.getpixel((3, 3)), (0, 0, 0))
 
             map_frame = {"profile": dict(copernicus.DEFAULT_PROFILE,
-                                           coverage_mode="single", black_nodata=False,
+                                           coverage_mode="single",
                                            map_labels=True)}
             map_png, map_downloaded = client.fetch_image(map_frame)
             self.assertEqual(overlay.call_count, 3)

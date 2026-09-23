@@ -1,8 +1,10 @@
 """Download progress accounting and presentation tests."""
 
 import io
+import ssl
 import tomllib
 import unittest
+import urllib.error
 from unittest import mock
 
 import marblescape_download as app
@@ -39,6 +41,122 @@ class _CancelOnReadResponse(_Response):
 
 
 class DownloadProgressTests(unittest.TestCase):
+    def test_retry_setting_means_one_initial_attempt_plus_one_to_nine_retries(self):
+        self.assertEqual(app.normalize_download_retries("1"), 1)
+        self.assertEqual(app.normalize_download_retries(9), 9)
+        for value in (0, 10, True, 2.5, "2.5", "", "ten"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                app.normalize_download_retries(value)
+
+    def test_transient_download_retries_reset_partial_progress(self):
+        tracker = progress.DownloadProgressTracker()
+        calls = []
+
+        def transfer(*_args, **_kwargs):
+            calls.append(None)
+            token = tracker.response_started(4)
+            tracker.advance(token, 4 if len(calls) == 3 else 2)
+            tracker.response_finished(token, 4 if len(calls) == 3 else 2)
+            if len(calls) < 3:
+                try:
+                    raise urllib.error.URLError("connection reset")
+                except urllib.error.URLError as exc:
+                    raise RuntimeError("temporary connection error") from exc
+            return ("installed", "current", 4)
+
+        with mock.patch.object(app, "DOWNLOAD_PROGRESS", tracker), \
+             mock.patch.object(app, "DOWNLOAD_RETRIES", 2), \
+             mock.patch.object(app, "_perform_update", side_effect=transfer), \
+             mock.patch.object(app, "wait_before_download_retry"):
+            result = app.perform_update("noaa", [{}], 32, 18, 32, 18)
+        self.assertEqual(result, ("installed", "current", 4))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(tracker.snapshot()["transferred"], 4)
+        self.assertEqual(app.download_completion_text(tracker.snapshot()), "Completed.")
+
+    def test_nine_retries_cap_network_attempts_at_ten(self):
+        tracker = progress.DownloadProgressTracker()
+        calls = []
+
+        def unavailable(*_args, **_kwargs):
+            calls.append(None)
+            try:
+                raise urllib.error.URLError("connection reset")
+            except urllib.error.URLError as exc:
+                raise RuntimeError("temporary connection error") from exc
+
+        with mock.patch.object(app, "DOWNLOAD_PROGRESS", tracker), \
+             mock.patch.object(app, "DOWNLOAD_RETRIES", 9), \
+             mock.patch.object(app, "_perform_update", side_effect=unavailable), \
+             mock.patch.object(app, "wait_before_download_retry"), \
+             self.assertRaises(app.DownloadRetriesExhausted):
+            app.perform_update("noaa", [{}], 32, 18, 32, 18)
+        self.assertEqual(len(calls), 10)
+        self.assertFalse(tracker.snapshot()["successful"])
+        self.assertEqual(app.download_completion_text(tracker.snapshot()), "")
+
+    def test_cancel_during_retry_delay_stops_before_next_request(self):
+        tracker = progress.DownloadProgressTracker()
+
+        def unavailable(*_args, **_kwargs):
+            try:
+                raise urllib.error.URLError("connection reset")
+            except urllib.error.URLError as exc:
+                raise RuntimeError("temporary connection error") from exc
+
+        def cancel(_delay):
+            self.assertTrue(tracker.request_cancel())
+            tracker.raise_if_cancelled()
+
+        transfer = mock.Mock(side_effect=unavailable)
+        with mock.patch.object(app, "DOWNLOAD_PROGRESS", tracker), \
+             mock.patch.object(app, "DOWNLOAD_RETRIES", 9), \
+             mock.patch.object(app, "_perform_update", transfer), \
+             mock.patch.object(app, "wait_before_download_retry", side_effect=cancel), \
+             self.assertRaises(progress.DownloadCancelledError):
+            app.perform_update("noaa", [{}], 32, 18, 32, 18)
+        self.assertEqual(transfer.call_count, 1)
+        self.assertTrue(tracker.snapshot()["cancelled"])
+
+    def test_permanent_http_and_certificate_errors_are_not_retried(self):
+        for reason in (
+            urllib.error.HTTPError("https://example.test", 400, "Bad Request", {}, io.BytesIO()),
+            urllib.error.URLError(ssl.SSLCertVerificationError("certificate verify failed")),
+        ):
+            with self.subTest(reason=reason):
+                tracker = progress.DownloadProgressTracker()
+
+                def fail(*_args, **_kwargs):
+                    raise RuntimeError("unavailable") from reason
+
+                transfer = mock.Mock(side_effect=fail)
+                with mock.patch.object(app, "DOWNLOAD_PROGRESS", tracker), \
+                     mock.patch.object(app, "DOWNLOAD_RETRIES", 9), \
+                     mock.patch.object(app, "_perform_update", transfer), \
+                     self.assertRaisesRegex(RuntimeError, "unavailable"):
+                    app.perform_update("noaa", [{}], 32, 18, 32, 18)
+                self.assertEqual(transfer.call_count, 1)
+                if isinstance(reason, urllib.error.HTTPError):
+                    reason.close()
+
+    def test_transient_error_after_install_phase_is_not_downloaded_again(self):
+        tracker = progress.DownloadProgressTracker()
+
+        def fail_after_download(*_args, **_kwargs):
+            tracker.seal_cancellation()
+            try:
+                raise urllib.error.URLError("storage operation")
+            except urllib.error.URLError as exc:
+                raise RuntimeError("failed after transfer") from exc
+
+        transfer = mock.Mock(side_effect=fail_after_download)
+        with mock.patch.object(app, "DOWNLOAD_PROGRESS", tracker), \
+             mock.patch.object(app, "DOWNLOAD_RETRIES", 9), \
+             mock.patch.object(app, "_perform_update", transfer), \
+             self.assertRaisesRegex(RuntimeError, "failed after transfer"):
+            app.perform_update("noaa", [{}], 32, 18, 32, 18)
+        self.assertEqual(transfer.call_count, 1)
+
     def test_exact_content_length_produces_percentage_size_and_speed(self):
         clock = _Clock()
         tracker = progress.DownloadProgressTracker(clock=clock)
@@ -53,6 +171,7 @@ class DownloadProgressTests(unittest.TestCase):
         self.assertEqual(snapshot["total"], len(payload))
         self.assertEqual(snapshot["percent"], 100.0)
         self.assertGreater(snapshot["speed"], 0)
+        self.assertEqual(app.download_completion_text(snapshot), "")
         text = app.format_download_progress(snapshot, speed_unit="MB/s")
         self.assertIn("100%", text)
         self.assertIn("/", text)
@@ -85,6 +204,7 @@ class DownloadProgressTests(unittest.TestCase):
         retained = tracker.snapshot(keep_completed_visible=True)
         self.assertTrue(retained["visible"])
         self.assertEqual(retained["percent"], 100.0)
+        self.assertEqual(app.download_completion_text(retained), "Completed.")
         tracker.begin(expected_requests=1)
         replacement = tracker.snapshot(keep_completed_visible=True)
         self.assertTrue(replacement["visible"])
@@ -146,8 +266,8 @@ class DownloadProgressTests(unittest.TestCase):
             app.normalize_download_speed_unit("frames/s")
 
     def test_saving_adds_missing_download_section_for_older_configuration(self):
-        legacy = "[service]\nupdate_interval_minutes = 10\n"
-        updated = app.ensure_download_configuration_section(legacy)
+        existing = "[service]\nupdate_interval_minutes = 10\n"
+        updated = app.ensure_download_configuration_section(existing)
         updated = app.replace_toml_values(updated, (
             ("download", "keep_completed_visible", True),
         ))

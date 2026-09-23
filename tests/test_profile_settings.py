@@ -5,7 +5,10 @@ import tkinter as tk
 import unittest
 from unittest.mock import Mock, patch
 
-from marblescape_profile_settings import ProfilesSettings, _profile_selection, _profile_time
+from marblescape_profile_settings import (
+    ProfilesSettings, _profile_coverage, _profile_latitude, _profile_location,
+    _profile_longitude, _profile_selection, _profile_time,
+)
 from marblescape_profiles import normalize_library
 
 FIRST, SECOND = "1" * 32, "2" * 32
@@ -63,11 +66,66 @@ class ProfileSettingsTests(unittest.TestCase):
         self.assertEqual(self.ui.get_library()["rotation"]["order"], [SECOND, FIRST])
         self.assertEqual(self.original, self.original_copy)
         self.assertIn("Solar", str(self.ui.tree.item(SECOND, "values")))
-        self.assertEqual(self.ui.tree["columns"], ("name", "source", "selection", "time"))
+        self.assertEqual(self.ui.tree["columns"],
+                         ("name", "source", "selection", "time", "location",
+                          "latitude", "longitude", "coverage"))
         values = self.ui.tree.item(SECOND, "values")
         self.assertEqual(values[0], "Sun · Active")
         self.assertEqual(values[3], "Latest · 2026-09-13 10:20 UTC")
+        self.assertEqual(values[4:], ("Sun", "-", "-", "-"))
         self.assertEqual(self.ui.detail_vars["time_utc"].get(), "2026-09-13 10:20 UTC")
+
+    def test_profile_rows_show_location_and_coverage_by_source(self):
+        copernicus = {"source": {"provider": "copernicus"}, "sources": {"copernicus": {
+            "latitude": 19.60508, "longitude": -155.43457,
+            "coverage_mode": "single", "lookback_days": 90,
+        }}}
+        item = {"id": FIRST, "name": "Hawaii", "settings": copernicus}
+        self.assertEqual(self.ui._row_values(item)[4:],
+                         ("Custom Lat/Long", "19.60508", "-155.43457",
+                          "Single latest acquisition"))
+        self.assertEqual(_profile_latitude(copernicus), "19.60508")
+        self.assertEqual(_profile_longitude(copernicus), "-155.43457")
+        copernicus["sources"]["copernicus"]["coverage_mode"] = "black"
+        self.assertEqual(_profile_coverage(copernicus), "No-data areas black")
+        copernicus["sources"]["copernicus"]["coverage_mode"] = "fill_gaps"
+        self.assertEqual(_profile_coverage(copernicus), "Gap fill · 90 days")
+
+        eumetsat = {"source": {"provider": "eumetsat"},
+                    "sources": {"eumetsat": {"fill_gaps": True, "gap_fill_lookback_hours": 24}},
+                    "view": {"preset": "europe"}}
+        self.assertEqual((_profile_location(eumetsat), _profile_coverage(eumetsat)),
+                         ("Europe", "Gap fill · 24 h"))
+        eumetsat["sources"]["eumetsat"]["fill_gaps"] = False
+        self.assertEqual(_profile_coverage(eumetsat), "-")
+        goes = {"source": {"provider": "goes_west"},
+                "sources": {"goes_west": {"area": "gwas"}}}
+        self.assertEqual((_profile_location(goes), _profile_coverage(goes)), ("gwas", "-"))
+
+    def test_rows_and_cells_can_be_copied_and_columns_can_be_hidden(self):
+        self.select(SECOND)
+        self.ui._context_item = SECOND
+        self.ui._context_column = "source"
+        self.ui._copy_context_cell()
+        self.assertEqual(self.root.clipboard_get(), "Solar / Sun")
+
+        self.ui._copy_selected_row()
+        copied = self.root.clipboard_get().split("\t")
+        self.assertEqual(tuple(copied), self.ui.tree.item(SECOND, "values"))
+
+        self.ui._column_visibility_vars["source"].set(False)
+        self.ui._toggle_column("source")
+        self.assertNotIn("source", self.ui.get_visible_columns())
+        self.assertEqual(tuple(self.ui.tree["displaycolumns"]), self.ui.get_visible_columns())
+
+        for column in tuple(self.ui.get_visible_columns())[1:]:
+            self.ui._column_visibility_vars[column].set(False)
+            self.ui._toggle_column(column)
+        last_column = self.ui.get_visible_columns()[0]
+        self.ui._column_visibility_vars[last_column].set(False)
+        self.ui._toggle_column(last_column)
+        self.assertEqual(self.ui.get_visible_columns(), (last_column,))
+        self.assertTrue(self.ui._column_visibility_vars[last_column].get())
 
     def test_add_and_update_capture_current_image_as_independent_draft(self):
         self.ui.name_var.set("Americas")
@@ -232,7 +290,7 @@ class ProfileSettingsTests(unittest.TestCase):
             layers=[{"kind": "wms", "name": "mtg_fd:rgb_geocolour", "enabled": True}],
         )
         details = self.ui._detail_values({"id": FIRST, "name": "Earth", "settings": eumetsat})
-        self.assertTrue(details["configuration"].startswith("EUMETView"))
+        self.assertTrue(details["configuration"].startswith("EUMETSAT Viewer"))
         self.assertTrue(details["configuration"].endswith("Europe"))
         self.assertIn("mtg_fd:rgb_geocolour", details["product"])
         self.assertEqual(details["fit_zoom"], "crop · 1.2x")

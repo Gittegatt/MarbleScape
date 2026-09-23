@@ -66,8 +66,10 @@ longitude = 10.4515
 map_zoom = 7
 map_labels = true
 coverage_mode = "fill_gaps"
-# Supported maximum lookback values: 3, 7, 14, 30, 45, 60, or 90 days.
+# Supported maximum lookback values: 3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, or 730 days.
 lookback_days = 14
+# Optical layers: maximum tile cloud cover, 0-100 in 5% steps. Unsupported layers ignore it.
+max_cloud_cover = 30
 
 # Create a free OAuth client under User Settings > OAuth clients at:
 # https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
@@ -94,6 +96,8 @@ speed_unit = "automatic"        # automatic, KB/s, MB/s, or Mbit/s
 show_progress = true             # Percentage and transferred/total size when known.
 show_progress_bar = true         # Indeterminate when the server gives no total size.
 keep_completed_visible = false   # Keep the successful result visible until the next download.
+retries = 2                      # 1-9 retries after the first attempt (2-10 total attempts).
+catalogue_retries = 2            # 1-9 retries after the first catalogue attempt; cached data is used if needed.
 
 [output]
 latest_folder = ""             # Empty = root/content/latest; relative to the script folder.
@@ -111,7 +115,7 @@ linux_root = "."
 # TrueColor night option apply only to EUMETSAT.
 # Available projections: Geographic, GEOS: MSG FES, MTG FD, GEOS: MSG RSS,
 # GEOS: MSG IODC, Spherical Mercator, North Polar, South Polar.
-# All seven official EUMETView projections are shown in Settings.
+# All seven official EUMETSAT viewer projections are shown in Settings.
 # Regional presets still use Geographic. Other projections apply to full_earth
 # or custom. Use fit_mode="crop" for Geographic full_earth at screen ratios.
 projection = "GEOS: MSG FES, MTG FD"
@@ -120,7 +124,6 @@ preset = "full_earth"           # full_earth, europe, mediterranean,
 fit_mode = "fit"                # fit or crop
 zoom = 1.1
 truecolor_black_night = false  # Applies only to MTG TrueColor.
-show_extended_projections = false  # Retained for compatibility; no longer hides choices.
 # For preset="custom", use logical x/y order in the selected projection:
 # bbox = [-6500000.0, -6500000.0, 6500000.0, 6500000.0]
 # With projection="Geographic": bbox = [west, south, east, north]
@@ -143,6 +146,9 @@ pause_on_error = true
 
 [display]
 time_zone = "system"            # system (recommended) or utc; display only
+
+[profile_list]
+visible_columns = ["name", "source", "selection", "time", "location", "latitude", "longitude", "coverage"]
 
 # These WMS layers apply only to EUMETSAT and are retained for later use.
 # Friendly basemap choices. Normally enable exactly one.
