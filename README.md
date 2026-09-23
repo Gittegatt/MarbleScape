@@ -108,7 +108,7 @@ apply to the Sun. Copernicus rendering requires a free Sentinel Hub OAuth client
 from the Copernicus Data Space account settings.
 
 Provider-specific satellites, missions, layers, projections, coverage modes,
-cloud filtering, lookback behavior, and selection matrices are documented in
+cloud filtering, mosaic brightness, lookback behavior, and selection matrices are documented in
 [Image source guide](docs/IMAGE_SOURCES.md).
 
 ## Settings overview
@@ -116,7 +116,7 @@ cloud filtering, lookback behavior, and selection matrices are documented in
 Settings contains these tabs:
 
 - **General** - Wallpaper, display time zone, and update timing.
-- **Image** - Source selection, image updates, framing, and output.
+- **Image** - Source selection, image updates, and framing.
 - **Download** - Transfer display, download retries, and catalogue retries.
 - **Profiles & Rotation** - Saved Image configurations and rotation timing.
 - **Storage & History** - Latest folder, History, retention, cache, and storage status.

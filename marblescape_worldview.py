@@ -351,9 +351,13 @@ class WorldviewClient:
         if track:
             DOWNLOAD_PROGRESS.raise_if_cancelled()
         _checked_url(url)
-        request = urllib.request.Request(url, headers={
+        cache = getattr(self, "metadata_cache", None) if not track else None
+        request_headers = {
             "User-Agent": self.user_agent, "Cache-Control": "no-cache",
-        })
+        }
+        if cache:
+            request_headers.update(cache.headers(url))
+        request = urllib.request.Request(url, headers=request_headers)
         try:
             opener = self._opener or urllib.request.build_opener(_Redirects())
             timeout = self.timeout if track else min(self.timeout, 20.0)
@@ -363,8 +367,14 @@ class WorldviewClient:
                     body = read_response(response, limit, track=track)
                 except ResponseTooLargeError:
                     raise WorldviewError("NASA GIBS response exceeds the permitted download size.")
-                return body, dict(response.headers.items())
+                response_headers = dict(response.headers.items())
+                if cache:
+                    cache.store(url, body, response_headers)
+                return body, response_headers
         except urllib.error.HTTPError as exc:
+            if exc.code == 304 and cache and (saved := cache.response(url, limit)) is not None:
+                exc.close()
+                return saved
             raise UnavailableError(
                 "NASA GIBS request failed (HTTP %s): %s" % (exc.code, url)
             ) from exc

@@ -44,6 +44,7 @@ from marblescape_catalogues import CatalogueClient
 from marblescape_copernicus import (
     CopernicusClient,
     DEFAULT_PROFILE as DEFAULT_COPERNICUS_PROFILE,
+    MAX_CATALOGUE_DATES,
     PROCESS_URL as COPERNICUS_PROCESS_URL,
     catalogue_revision as copernicus_catalogue_revision,
     get_layer as get_copernicus_layer,
@@ -3514,7 +3515,13 @@ def warm_public_catalogues():
                 try:
                     profile = SOURCE_PROFILES["copernicus"]
                     output_size = get_output_dimensions()
-                    dates = get_copernicus_client().list_dates(profile, output_size)
+                    cached = client.cached_copernicus_dates(profile, output_size)
+                    since = cached[0] if cached else None
+                    dates = get_copernicus_client().list_dates(
+                        profile, output_size, since=since
+                    )
+                    if cached:
+                        dates = sorted(set(cached) | set(dates), reverse=True)[:MAX_CATALOGUE_DATES]
                     client.store_copernicus_dates(profile, output_size, dates)
                     problem = None
                     break
@@ -3649,7 +3656,7 @@ def copernicus_frame_signature(frame):
         profile["product"], profile["layer"], profile["date"],
         profile["latitude"], profile["longitude"], profile["map_zoom"],
         profile["map_labels"], profile["coverage_mode"], profile["lookback_days"],
-        profile["max_cloud_cover"],
+        profile["max_cloud_cover"], profile["brightness"],
         frame["timestamp"],
     )
 

@@ -70,6 +70,8 @@ coverage_mode = "fill_gaps"
 lookback_days = 14
 # Optical layers: maximum tile cloud cover, 0-100 in 5% steps. Unsupported layers ignore it.
 max_cloud_cover = 30
+# Copernicus mosaic brightness: 25-200 in 5% steps; 100 uses the calibrated default.
+brightness = 100
 
 # Create a free OAuth client under User Settings > OAuth clients at:
 # https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings

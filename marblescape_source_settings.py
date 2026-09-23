@@ -451,8 +451,28 @@ class SourceSettings:
             self._refresh_button.configure(state="disabled")
             return
         self._show_saved_profile()
-        status = getattr(self._client, "catalogue_refresh_status", {}) or {}
-        self._load_areas(refresh=not bool(status.get("running")))
+        if not self._show_cached_catalogue():
+            status = getattr(self._client, "catalogue_refresh_status", {}) or {}
+            self._load_areas(refresh=not bool(status.get("running")))
+
+    def _show_cached_catalogue(self):
+        cached_areas = getattr(self._client, "cached_areas", None)
+        cached_products = getattr(self._client, "cached_products", None)
+        if not callable(cached_areas) or not callable(cached_products):
+            return False
+        areas = cached_areas(self._provider)
+        if not areas:
+            return False
+        self._receive_areas(areas, refresh=False, request_products=False)
+        profile = self._profiles[self._provider]
+        if not any(item["id"] == profile["area"] for item in areas):
+            return True
+        products = cached_products(self._provider, profile["area"])
+        if products:
+            self._receive_products(products)
+            return True
+        self._load_products(refresh=False)
+        return True
 
     def _show_saved_profile(self):
         profile = self._profiles[self._provider]
@@ -509,11 +529,13 @@ class SourceSettings:
         threading.Thread(target=worker, name="MarbleScape-catalogue", daemon=True).start()
 
     def _load_areas(self, refresh=False):
-        self._category_combo.configure(state="disabled")
-        self._filter_entry.configure(state="disabled")
-        self._area_combo.configure(state="disabled")
-        self._product_combo.configure(state="disabled")
-        self._resolution_combo.configure(state="disabled")
+        if not self._areas:
+            self._category_combo.configure(state="disabled")
+            self._filter_entry.configure(state="disabled")
+            self._area_combo.configure(state="disabled")
+        if not self._products:
+            self._product_combo.configure(state="disabled")
+            self._resolution_combo.configure(state="disabled")
         self._request("areas", refresh=refresh)
 
     def _advance_generation(self):
@@ -525,14 +547,18 @@ class SourceSettings:
         )
 
     def _load_products(self, refresh=False):
-        self._products = []
-        self._product_by_label = {}
         profile = self._profiles[self._provider]
-        self._product_var.set(profile.get("product", ""))
-        resolution = profile.get("resolution", "")
-        self._resolution_var.set("Largest available" if resolution == "largest" else resolution)
-        self._product_combo.configure(state="disabled")
-        self._resolution_combo.configure(state="disabled")
+        if not self._products or not self._usable[self._provider]:
+            self._products = []
+            self._product_by_label = {}
+            self._product_var.set(profile.get("product", ""))
+            resolution = profile.get("resolution", "")
+            self._resolution_var.set(
+                "Automatic (recommended)" if resolution == "auto" else
+                "Largest available" if resolution == "largest" else resolution
+            )
+            self._product_combo.configure(state="disabled")
+            self._resolution_combo.configure(state="disabled")
         self._request("products", refresh=refresh, area_id=profile["area"])
 
     def _poll(self):
@@ -593,7 +619,7 @@ class SourceSettings:
         # Including IDs keeps duplicate location/product names distinguishable.
         return {f"{item['label']} [{item['id']}]": item for item in items}
 
-    def _receive_areas(self, areas, refresh):
+    def _receive_areas(self, areas, refresh, request_products=True):
         if not areas:
             noun = "layers" if self._provider == "worldview" else "areas"
             raise ValueError(f"No {noun} are currently listed for this source.")
@@ -619,10 +645,20 @@ class SourceSettings:
             self._catalogue_activity.finish(False)
             self._refresh_button.configure(state="normal", text="Refresh catalogue")
             return
+        if not request_products:
+            return
         self._catalogue_activity.set_progress(1, 2)
         # CIRA and NASA publish areas and products in one catalogue document.
         # The area request above already refreshed it; rereading it here can
         # trigger a second slow network transfer for the same button click.
+        offline = getattr(self._client, "catalogue_offline", None)
+        if callable(offline) and offline(self._provider):
+            cached_products = getattr(self._client, "cached_products", None)
+            products = cached_products(self._provider, profile["area"]) \
+                if callable(cached_products) else None
+            if products:
+                self._receive_products(products)
+                return
         self._load_products(refresh=refresh and self._provider not in ("slider", "worldview"))
 
     def _filter_areas(self, *_args):
@@ -899,7 +935,8 @@ class SourceSettings:
         self._all_status_label.grid()
         self._all_progress.grid()
         if self._provider in CATALOGUE_PROVIDERS:
-            self._load_areas(refresh=False)
+            if not self._show_cached_catalogue():
+                self._load_areas(refresh=False)
 
     def _sync_global_refresh(self):
         """Observe startup/other-dialog jobs using a copied, thread-safe status."""
@@ -938,7 +975,8 @@ class SourceSettings:
             if was_running:
                 self._stop_all_progress(not error)
             if was_running and self._provider in CATALOGUE_PROVIDERS:
-                self._load_areas(refresh=False)
+                if not self._show_cached_catalogue():
+                    self._load_areas(refresh=False)
             elif was_running and self._provider == "eumetsat":
                 self.eumetsat_settings.refresh(False)
 

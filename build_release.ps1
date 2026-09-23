@@ -111,6 +111,39 @@ function Copy-PublicFile {
     )
 }
 
+function Write-ReleaseArchive {
+    param(
+        [string]$SourceDirectory,
+        [string]$ArchivePath
+    )
+
+    $archiveCode = @'
+from pathlib import Path
+import sys
+import zipfile
+
+source = Path(sys.argv[1])
+archive_path = Path(sys.argv[2])
+with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED,
+                     compresslevel=9, allowZip64=True) as archive:
+    for item in sorted(source.rglob("*")):
+        if item.is_symlink():
+            raise RuntimeError(f"Release file must not be a link: {item}")
+        if item.is_file():
+            archive.write(item, item.relative_to(source.parent).as_posix())
+'@
+    $archiveHelperPath = Join-Path $tempBuildRoot "archive_release.py"
+    [System.IO.File]::WriteAllText(
+        $archiveHelperPath,
+        $archiveCode,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    & $PythonCommand $archiveHelperPath $SourceDirectory $ArchivePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not create release archive: $ArchivePath"
+    }
+}
+
 # Validate the source bundle before replacing any existing release files.
 & $PythonCommand (Join-Path $projectRoot "verify_pystray_source.py")
 if ($LASTEXITCODE -ne 0) {
@@ -272,19 +305,7 @@ try {
     }
 
     # Publish the same smoke-tested binary in the project root on every build.
-    $rootExecutableTemp = Join-Path $projectRoot (
-        ".marblescape-" + [guid]::NewGuid().ToString("N") + ".tmp"
-    )
-    Assert-ChildPath -Parent $projectRoot -Candidate $rootExecutableTemp
-    try {
-        Copy-Item -LiteralPath $builtExecutable -Destination $rootExecutableTemp
-        Move-Item -LiteralPath $rootExecutableTemp -Destination $rootExecutable -Force
-    }
-    finally {
-        if (Test-Path -LiteralPath $rootExecutableTemp) {
-            Remove-Item -LiteralPath $rootExecutableTemp -Force
-        }
-    }
+    Copy-Item -LiteralPath $builtExecutable -Destination $rootExecutable -Force
 
     foreach ($file in @(
         ".gitignore",
@@ -306,6 +327,7 @@ try {
         "marblescape_catalogues.py",
         "marblescape_catalogue_activity.py",
         "marblescape_copernicus.py",
+        "marblescape_copernicus_mosaics.py",
         "marblescape_copernicus_settings.py",
         "marblescape_copernicus_catalog.json",
         "marblescape_source_layout.py",
@@ -414,12 +436,12 @@ try {
             Copy-PublicFile -SourceName $sourceName -DestinationDirectory $thirdPartyDirectory
         }
     }
-    Compress-Archive -LiteralPath $sourcePackageDirectory -DestinationPath $sourceArchive -CompressionLevel Optimal
+    Write-ReleaseArchive -SourceDirectory $sourcePackageDirectory -ArchivePath $sourceArchive
     # Keep the exact application source and build instructions with the binary.
     $correspondingSourceDirectory = Join-Path $windowsPackageDirectory "source"
     New-Item -ItemType Directory -Path $correspondingSourceDirectory | Out-Null
     Copy-Item -LiteralPath $sourceArchive -Destination $correspondingSourceDirectory
-    Compress-Archive -LiteralPath $windowsPackageDirectory -DestinationPath $windowsArchive -CompressionLevel Optimal
+    Write-ReleaseArchive -SourceDirectory $windowsPackageDirectory -ArchivePath $windowsArchive
 
     $checksumLines = foreach ($archive in @(
         $sourceArchive,

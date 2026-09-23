@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
-import inspect
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
 import threading
+import time
 from concurrent.futures import Future
 
 from marblescape_himawari import HimawariClient
@@ -21,6 +24,90 @@ from marblescape_eumetsat import EumetsatCatalogueClient
 NOAA_PROVIDERS = frozenset(("goes_east", "goes_west", "solar"))
 CATALOGUE_PROVIDERS = (*sorted(NOAA_PROVIDERS), "himawari", "slider", "worldview")
 _CACHE_VERSION = 1
+_HTTP_CACHE_LIMIT = 16 * 1024 * 1024
+_HTTP_ENTRY_LIMIT = 8 * 1024 * 1024
+
+
+class _CatalogueHttpCache:
+    """Keep validated catalogue responses for conditional requests across starts."""
+
+    def __init__(self, path=None):
+        self.path = Path(path).resolve() if path else None
+        self._lock = threading.RLock()
+        self._entries = {}
+        if self.path is not None and self.path.is_file():
+            try:
+                if self.path.stat().st_size <= 24 * 1024 * 1024:
+                    value = json.loads(self.path.read_text(encoding="utf-8"))
+                    if isinstance(value, dict) and value.get("version") == 1 \
+                            and isinstance(value.get("entries"), dict):
+                        self._entries = value["entries"]
+            except (OSError, ValueError, TypeError):
+                pass
+
+    def _save(self):
+        if self.path is None:
+            return
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(
+                json.dumps({"version": 1, "entries": self._entries}, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.replace(temporary, self.path)
+        except OSError:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def headers(self, url):
+        with self._lock:
+            entry = self._entries.get(url, {})
+            validators = entry.get("headers", {}) if isinstance(entry, dict) else {}
+            result = {}
+            if isinstance(validators, dict):
+                if validators.get("etag"):
+                    result["If-None-Match"] = validators["etag"]
+                if validators.get("last-modified"):
+                    result["If-Modified-Since"] = validators["last-modified"]
+            return result
+
+    def response(self, url, limit):
+        with self._lock:
+            entry = self._entries.get(url)
+            if not isinstance(entry, dict):
+                return None
+            try:
+                body = base64.b64decode(entry["body"], validate=True)
+                if len(body) > limit:
+                    return None
+                return body, dict(entry["headers"])
+            except (KeyError, TypeError, ValueError, binascii.Error):
+                return None
+
+    def store(self, url, body, headers):
+        headers = {str(key).lower(): value for key, value in headers.items()}
+        validators = {key: value for key, value in
+                      (("etag", headers.get("etag")),
+                       ("last-modified", headers.get("last-modified")))
+                      if isinstance(value, str) and value}
+        if not validators or len(body) > _HTTP_ENTRY_LIMIT:
+            with self._lock:
+                if self._entries.pop(url, None) is not None:
+                    self._save()
+            return
+        entry = {"headers": validators, "body": base64.b64encode(body).decode("ascii")}
+        with self._lock:
+            if self._entries.get(url) == entry:
+                return
+            self._entries.pop(url, None)
+            self._entries[url] = entry
+            while sum(len(value.get("body", "")) for value in self._entries.values()
+                      if isinstance(value, dict)) > _HTTP_CACHE_LIMIT:
+                self._entries.pop(next(iter(self._entries)))
+            self._save()
 
 
 class _CatalogueDiskCache:
@@ -187,6 +274,8 @@ class CatalogueClient:
     def __init__(self, timeout=90, user_agent="MarbleScape", noaa=None, himawari=None,
                  slider=None, worldview=None, eumetsat=None, cache_path=None, retries=2):
         self._cache = _CatalogueDiskCache(cache_path)
+        http_cache_path = Path(cache_path).with_name("catalogue_http.json") if cache_path else None
+        self._http_cache = _CatalogueHttpCache(http_cache_path)
         self.retries = max(1, min(9, int(retries)))
         self._fallback_warnings = {}
         self.noaa = noaa if noaa is not None else NOAAClient(timeout=timeout, user_agent=user_agent)
@@ -205,7 +294,12 @@ class CatalogueClient:
             on_catalogue=self._cache.store_eumetsat,
             retries=self.retries,
         )
+        for client in (self.noaa, self.himawari, self.slider, self.worldview,
+                       self.eumetsat):
+            if hasattr(client, "__dict__"):
+                client.metadata_cache = self._http_cache
         self._lock = threading.RLock()
+        self._noaa_retry_after = 0.0
         self._future = None
         self._status = {"running": False, "done": 0, "total": 0,
                         "message": "", "error": ""}
@@ -221,7 +315,26 @@ class CatalogueClient:
             return self.worldview
         raise ValueError("Unknown catalogue provider: " + str(provider))
 
+    def cached_areas(self, provider):
+        return self._cache.areas(provider)
+
+    def cached_products(self, provider, area_id):
+        return self._cache.products(provider, area_id)
+
+    def catalogue_offline(self, provider):
+        with self._lock:
+            return provider in NOAA_PROVIDERS and time.monotonic() < self._noaa_retry_after
+
+    def _noaa_result(self, provider, available):
+        if provider in NOAA_PROVIDERS:
+            with self._lock:
+                self._noaa_retry_after = 0.0 if available else time.monotonic() + 120.0
+
     def list_areas(self, provider, refresh=False):
+        if not refresh and self.catalogue_offline(provider):
+            cached = self._cache.areas(provider)
+            if cached:
+                return cached
         client = self._client(provider)
         last_value = None
         last_error = None
@@ -230,6 +343,7 @@ class CatalogueClient:
                 last_value = client.list_areas(provider, refresh=refresh)
                 warning = str(getattr(client, "catalogue_warning", "") or "").strip()
                 if last_value and not warning:
+                    self._noaa_result(provider, True)
                     self._fallback_warnings.pop(provider, None)
                     self._cache.store_areas(provider, last_value)
                     return last_value
@@ -238,6 +352,7 @@ class CatalogueClient:
                 last_error = str(exc)
         cached = self._cache.areas(provider)
         if cached:
+            self._noaa_result(provider, False)
             self._fallback_warnings[provider] = (
                 f"{last_error or 'Catalogue update failed'}; using cached catalogue data."
             )
@@ -247,6 +362,10 @@ class CatalogueClient:
         raise RuntimeError(last_error or "Catalogue data is unavailable.")
 
     def list_products(self, provider, area_id, refresh=False):
+        if not refresh and self.catalogue_offline(provider):
+            cached = self._cache.products(provider, area_id)
+            if cached:
+                return cached
         client = self._client(provider)
         last_value = None
         last_error = None
@@ -255,6 +374,7 @@ class CatalogueClient:
                 last_value = client.list_products(provider, area_id, refresh=refresh)
                 warning = str(getattr(client, "catalogue_warning", "") or "").strip()
                 if last_value and not warning:
+                    self._noaa_result(provider, True)
                     self._fallback_warnings.pop(provider, None)
                     self._cache.store_products(provider, area_id, last_value)
                     return last_value
@@ -263,6 +383,7 @@ class CatalogueClient:
                 last_error = str(exc)
         cached = self._cache.products(provider, area_id)
         if cached:
+            self._noaa_result(provider, False)
             self._fallback_warnings[provider] = (
                 f"{last_error or 'Catalogue update failed'}; using cached catalogue data."
             )
@@ -402,10 +523,18 @@ class CatalogueClient:
                         if summary.get("complete"):
                             break
                         last_problem = str(summary.get("warning") or "catalogue update was incomplete")
+                        if label == "NOAA":
+                            break
                     except Exception as exc:
                         last_problem = str(exc)
                         summary = None
+                        if label == "NOAA":
+                            break
                 if summary is None or not summary.get("complete"):
+                    if label == "NOAA":
+                        self._noaa_result("goes_east", False)
+                        for provider in NOAA_PROVIDERS:
+                            self._fallback_warnings[provider] = last_problem
                     cached = self._cached_source_summary(label)
                     cached_available = bool(cached["providers"] or cached["products"])
                     detail = f"{label}: {last_problem or 'catalogue update failed'}"
@@ -417,6 +546,10 @@ class CatalogueClient:
                         summary = {**cached, "errors": [detail],
                                    "warning": detail, "complete": False}
                 else:
+                    if label == "NOAA":
+                        self._noaa_result("goes_east", True)
+                        for provider in NOAA_PROVIDERS:
+                            self._fallback_warnings.pop(provider, None)
                     changed = False
                     try:
                         if label == "EUMETSAT":

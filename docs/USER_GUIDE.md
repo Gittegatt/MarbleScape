@@ -122,6 +122,13 @@ invalid requests and authentication errors are reported without retrying.
 **Catalogue retries** independently sets 1-9 retries after the first metadata
 request. If every catalogue attempt fails, MarbleScape uses the most recent
 catalogue data stored in `content/catalogues.json` when available.
+At startup, MarbleScape checks the public catalogues in the background. For
+catalogue pages that provide an ETag or Last-Modified value, it uses a
+conditional request and reuses unchanged responses from
+`content/catalogue_http.json`. Sources without these validators still require
+a full metadata response. Copernicus checks only dates since the latest cached
+date, including a 14-day overlap for late additions. A manual Copernicus
+catalogue refresh still checks the complete available date range.
 **Cancel download** is enabled in
 the fixed footer while an image transfer can still be stopped. Cancelling keeps
 the current wallpaper, discards the unfinished result, and creates no History
@@ -317,7 +324,7 @@ and `resolution`.
 For Worldview, `area` is the GIBS layer ID and `product` is `latest` or a
 fixed date offered by that layer.
 `sources.copernicus` stores its catalogue selection, date, location, zoom,
-maximum cloud cover, and map options; `[copernicus]` stores its OAuth Client ID
+maximum cloud cover, mosaic brightness, and map options; `[copernicus]` stores its OAuth Client ID
 and protected secret. Switching providers retains each source's settings.
 The `[download]` table stores the optional speed, size, percentage,
 progress-bar, and completed-status retention preferences.
