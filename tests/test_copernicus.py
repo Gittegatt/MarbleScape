@@ -103,7 +103,7 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(value["lookback_days"], 14)
         self.assertEqual(value["max_cloud_cover"], 30)
         self.assertEqual(copernicus.LOOKBACK_DAYS,
-                         (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 730))
+                         (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 550, 730, 920, 1095))
         for days in copernicus.LOOKBACK_DAYS:
             with self.subTest(lookback_days=days):
                 normalized = copernicus.normalize_profile({
@@ -421,6 +421,52 @@ class ClientTests(unittest.TestCase):
         self.assertTrue(all(call.args[2] <= 2500 and call.args[3] <= 2500
                             for call in process.call_args_list))
         self.assertEqual(image.getpixel((2600, 2500)), (1, 2, 3, 255))
+
+    def test_gap_fill_refines_missing_pixels_without_replacing_existing_imagery(self):
+        client = copernicus.CopernicusClient("id", "secret")
+        profile = copernicus.normalize_profile({
+            **copernicus.DEFAULT_PROFILE, "date": "2026-09-01",
+            "coverage_mode": "fill_gaps",
+        })
+        frame = client.latest(profile, (1024, 512))
+        broad = Image.new("RGBA", (1024, 512), (0, 0, 0, 0))
+        broad.paste((200, 0, 0, 255), (0, 0, 768, 512))
+
+        def process(_frame, _bbox, width, height):
+            if (width, height) == (1024, 512):
+                return broad.copy(), 10
+            return Image.new("RGBA", (width, height), (0, 180, 0, 255)), 5
+
+        with mock.patch.object(client, "_process_tile", side_effect=process) as requests:
+            image, downloaded = client._render_satellite(frame)
+
+        self.assertEqual(requests.call_count, 2)
+        self.assertEqual(requests.call_args_list[1].args[2:], (512, 512))
+        left, top, world_size = client._view_pixels(frame)
+        expected_bbox = client._mercator_bbox(left, top, world_size, 512, 0, 512, 512)
+        self.assertEqual(requests.call_args_list[1].args[1], expected_bbox)
+        self.assertEqual(image.getpixel((100, 100)), (200, 0, 0, 255))
+        self.assertEqual(image.getpixel((700, 100)), (200, 0, 0, 255))
+        self.assertEqual(image.getpixel((900, 100)), (0, 180, 0, 255))
+        self.assertEqual(downloaded, 15)
+
+    def test_gap_fill_keeps_genuine_no_data_when_smaller_request_is_empty(self):
+        client = copernicus.CopernicusClient("id", "secret")
+        profile = copernicus.normalize_profile({
+            **copernicus.DEFAULT_PROFILE, "date": "2026-09-01",
+            "coverage_mode": "fill_gaps",
+        })
+        frame = client.latest(profile, (1024, 512))
+        empty = Image.new("RGBA", (1024, 512), (0, 0, 0, 0))
+        with mock.patch.object(client, "_process_tile", side_effect=[
+            (empty, 10),
+            (Image.new("RGBA", (512, 512), (0, 0, 0, 0)), 5),
+            (Image.new("RGBA", (512, 512), (0, 0, 0, 0)), 5),
+        ]) as requests:
+            image, downloaded = client._render_satellite(frame)
+        self.assertEqual(requests.call_count, 3)
+        self.assertEqual(image.getchannel("A").getextrema(), (0, 0))
+        self.assertEqual(downloaded, 20)
 
     def test_14400_by_8640_output_is_partitioned_within_process_limit(self):
         client = copernicus.CopernicusClient("id", "secret")

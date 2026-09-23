@@ -320,11 +320,17 @@ users; COPERNICUS_90 remains the unrestricted DEM default on the service.
 The Process API renders the selected official evalscript. **Coverage mode**
 offers a single latest acquisition, black no-data areas, or a gap-filling
 composite. Gap filling uses the most recent valid pixel from the selected 3,
-7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, or 730-day lookback; 14 days is the default for new profiles. Any area
+7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 550, 730, 920, or 1095-day
+lookback; 14 days is the default for new profiles. Any area
 still without imagery uses the map background. Outputs above the
 Process API's 2500 × 2500 pixel request limit are split into tiles and joined
-without reducing the configured wallpaper resolution. **Map labels** adds the
-GISCO/OpenStreetMap place, road, POI, and boundary overlay. The black coverage
+without reducing the configured wallpaper resolution. In gap-fill mode, a large
+response with transparent areas is checked again in 512-pixel spatial tiles.
+Only tiles containing missing pixels are requested again; existing image pixels
+are kept. This can recover coverage that the Process API omits from a broad
+request, but it adds API requests and cannot create imagery where none exists.
+
+**Map labels** adds the GISCO/OpenStreetMap place, road, POI, and boundary overlay. The black coverage
 mode keeps transparent no-data pixels black. Attribution is written into
 generated images whenever map tiles are used.
 The cloud limit is applied to both acquisition-date discovery and image

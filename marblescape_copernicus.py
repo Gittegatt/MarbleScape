@@ -57,6 +57,7 @@ CATALOGUE_FILENAME = "marblescape_copernicus_catalog.json"
 MAX_WEB_MERCATOR_LATITUDE = 85.05112878
 WEB_MERCATOR_HALF_WORLD = 20037508.342789244
 PROCESS_TILE_LIMIT = 2500
+GAP_REFINEMENT_TILE_SIZE = 512
 MAX_RESPONSE_BYTES = 192 * 1024 * 1024
 MAX_CATALOGUE_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_CATALOGUE_DATES = 5000
@@ -66,7 +67,7 @@ GISCO_MAX_NATIVE_ZOOM = 18
 NETWORK_ATTEMPTS = 3
 SUPPORTED_MAP_ZOOMS = tuple(range(3, 26))
 COVERAGE_MODES = ("single", "black", "fill_gaps")
-LOOKBACK_DAYS = (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 730)
+LOOKBACK_DAYS = (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 550, 730, 920, 1095)
 DATA_TYPE_ZOOM_RANGES = {
     "sentinel-1-grd": (7, 18),
     "sentinel-2-l1c": (10, 18),
@@ -946,13 +947,42 @@ class CopernicusClient:
         except (OSError, ValueError) as exc:
             raise RuntimeError("Copernicus Process API returned an invalid PNG image.") from exc
 
+    def _refine_process_gaps(self, frame, image, origin_x, origin_y, view_pixels):
+        left, top, world_size = view_pixels
+        alpha = image.getchannel("A")
+        downloaded = 0
+        for y in range(0, image.height, GAP_REFINEMENT_TILE_SIZE):
+            for x in range(0, image.width, GAP_REFINEMENT_TILE_SIZE):
+                DOWNLOAD_PROGRESS.raise_if_cancelled()
+                width = min(GAP_REFINEMENT_TILE_SIZE, image.width - x)
+                height = min(GAP_REFINEMENT_TILE_SIZE, image.height - y)
+                box = (x, y, x + width, y + height)
+                if alpha.crop(box).getextrema()[0] == 255:
+                    continue
+                bbox = self._mercator_bbox(
+                    left, top, world_size, origin_x + x, origin_y + y, width, height
+                )
+                fill, size = self._process_tile(frame, bbox, width, height)
+                downloaded += size
+                original = image.crop(box)
+                image.paste(Image.alpha_composite(fill, original), (x, y))
+        return downloaded
+
     def _render_satellite(self, frame):
         width, height = frame["width"], frame["height"]
         canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
         downloaded = 0
+        view_pixels = None
         for x, y, part_width, part_height, bbox in self._process_parts(frame):
             DOWNLOAD_PROGRESS.raise_if_cancelled()
             image, size = self._process_tile(frame, bbox, part_width, part_height)
+            if (frame["profile"]["coverage_mode"] == "fill_gaps"
+                    and (part_width > GAP_REFINEMENT_TILE_SIZE
+                         or part_height > GAP_REFINEMENT_TILE_SIZE)
+                    and image.getchannel("A").getextrema()[0] < 255):
+                if view_pixels is None:
+                    view_pixels = self._view_pixels(frame)
+                size += self._refine_process_gaps(frame, image, x, y, view_pixels)
             canvas.alpha_composite(image, (x, y))
             downloaded += size
         return canvas, downloaded

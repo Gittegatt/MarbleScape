@@ -558,7 +558,7 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertEqual(
             cop._lookback_combo["values"],
             tuple(f"{days} days" for days in
-                  (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 730)),
+                  (3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 550, 730, 920, 1095)),
         )
         self.assertEqual(str(cop._lookback_combo["state"]), "readonly")
         cop._coverage_var.set("Single latest acquisition")
