@@ -17,6 +17,15 @@ from marblescape_copernicus_mosaics import evalscript_for_brightness
 import marblescape_download as app
 
 
+L2A_PROFILE = {
+    **copernicus.DEFAULT_PROFILE,
+    "mission": "Sentinel-2",
+    "product": "DEFAULT-THEME::a91f72",
+    "layer": "1_TRUE_COLOR",
+    "coverage_mode": "fill_gaps",
+}
+
+
 class _Response:
     def __init__(self, data, content_type):
         self._stream = io.BytesIO(data)
@@ -106,7 +115,7 @@ class CatalogueTests(unittest.TestCase):
                                               "latitude": 52, "longitude": 13})
         self.assertEqual(value["date"], "2026-09-01")
         self.assertEqual(value["latitude"], 52.0)
-        self.assertEqual(value["coverage_mode"], "fill_gaps")
+        self.assertEqual(value["coverage_mode"], "single")
         self.assertEqual(value["lookback_days"], 14)
         self.assertEqual(value["max_cloud_cover"], 30)
         self.assertEqual(value["brightness"], 100)
@@ -131,11 +140,20 @@ class CatalogueTests(unittest.TestCase):
             with self.subTest(update=update), self.assertRaises(ValueError):
                 copernicus.normalize_profile({**copernicus.DEFAULT_PROFILE, **update})
 
-    def test_default_matches_browser_sentinel_2_l2a_and_zoom_ranges(self):
+    def test_default_uses_quarterly_true_color_mosaic_and_preserves_saved_l2a(self):
         product = copernicus.get_product(
             copernicus.DEFAULT_PROFILE["configuration"], copernicus.DEFAULT_PROFILE["product"]
         )
         layer = copernicus.get_layer(product, copernicus.DEFAULT_PROFILE["layer"])
+        self.assertEqual(copernicus.DEFAULT_PROFILE["mission"], "Sentinel-2 Mosaics")
+        self.assertEqual(product["name"], "Sentinel-2 Quarterly Mosaics")
+        self.assertEqual(layer["name"], "True Color Cloudless")
+        self.assertEqual(copernicus.map_zooms(layer)[0], 2)
+        self.assertEqual(copernicus.normalize_profile(L2A_PROFILE), L2A_PROFILE)
+
+    def test_sentinel_2_l2a_zoom_ranges(self):
+        product = copernicus.get_product("DEFAULT-THEME", L2A_PROFILE["product"])
+        layer = copernicus.get_layer(product, L2A_PROFILE["layer"])
         self.assertEqual(product["name"], "Sentinel-2 L2A")
         self.assertEqual(layer["data_type"], "sentinel-2-l2a")
         expected = {
@@ -174,7 +192,7 @@ class CatalogueTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "10 through 18"):
             copernicus.normalize_profile({
-                **copernicus.DEFAULT_PROFILE,
+                **L2A_PROFILE,
                 "product": l1c_product["id"],
                 "layer": l1c_product["layers"][0]["id"],
                 "map_zoom": 7,
@@ -234,8 +252,8 @@ class CatalogueTests(unittest.TestCase):
         self.assertIn("var brightness = 1.50;", evalscript_for_brightness(mosaic, 150))
         self.assertEqual(original, mosaic["evalscript"])
         ordinary = copernicus.get_layer(
-            copernicus.get_product("DEFAULT-THEME", copernicus.DEFAULT_PROFILE["product"]),
-            copernicus.DEFAULT_PROFILE["layer"],
+            copernicus.get_product("DEFAULT-THEME", L2A_PROFILE["product"]),
+            L2A_PROFILE["layer"],
         )
         self.assertEqual(evalscript_for_brightness(ordinary, 150), ordinary["evalscript"])
 
@@ -400,7 +418,7 @@ class ClientTests(unittest.TestCase):
             return responses.pop(0)
 
         client._json_request = request
-        cloud_profile = {**copernicus.DEFAULT_PROFILE, "max_cloud_cover": 15}
+        cloud_profile = {**L2A_PROFILE, "max_cloud_cover": 15}
         frame = client.latest(cloud_profile, (1920, 1080))
         self.assertEqual(frame["date"], "2026-09-12")
         self.assertEqual(frame["timestamp"], "2026-09-12T10:40:30.123000Z")
@@ -443,7 +461,7 @@ class ClientTests(unittest.TestCase):
             return {"features": [], "context": {}}
 
         client._json_request = request
-        profile = {**copernicus.DEFAULT_PROFILE, "latitude": 19.60508,
+        profile = {**L2A_PROFILE, "latitude": 19.60508,
                    "longitude": -155.43457, "map_zoom": 11,
                    "lookback_days": 90, "max_cloud_cover": 0}
         with self.assertRaisesRegex(RuntimeError, "at most 0% cloud cover"):
@@ -461,7 +479,7 @@ class ClientTests(unittest.TestCase):
         client = copernicus.CopernicusClient("id", "secret", timeout=17, opener=opener)
         client._token = "token"
         client._token_deadline = time.monotonic() + 60
-        profile = copernicus.normalize_profile({**copernicus.DEFAULT_PROFILE,
+        profile = copernicus.normalize_profile({**L2A_PROFILE,
                                                 "date": "2026-09-01", "max_cloud_cover": 15})
         frame = client.latest(profile, (3, 2))
         image, downloaded = client._process_tile(frame, [1, 2, 3, 4], 3, 2)
@@ -526,7 +544,7 @@ class ClientTests(unittest.TestCase):
     def test_gap_fill_refines_missing_pixels_without_replacing_existing_imagery(self):
         client = copernicus.CopernicusClient("id", "secret")
         profile = copernicus.normalize_profile({
-            **copernicus.DEFAULT_PROFILE, "date": "2026-09-01",
+            **L2A_PROFILE, "date": "2026-09-01",
             "coverage_mode": "fill_gaps",
         })
         frame = client.latest(profile, (1024, 512))
@@ -554,7 +572,7 @@ class ClientTests(unittest.TestCase):
     def test_gap_fill_keeps_genuine_no_data_when_smaller_request_is_empty(self):
         client = copernicus.CopernicusClient("id", "secret")
         profile = copernicus.normalize_profile({
-            **copernicus.DEFAULT_PROFILE, "date": "2026-09-01",
+            **L2A_PROFILE, "date": "2026-09-01",
             "coverage_mode": "fill_gaps",
         })
         frame = client.latest(profile, (1024, 512))

@@ -87,7 +87,9 @@ when a comparable clean product without SLIDER's optional overlays is required.
 | **Copernicus DEM** | Digital elevation model | Terrain and relief with broad coverage | Timeless terrain data rather than a current satellite image |
 | **Landsat 8/9** | Optical and thermal imagery | Land and water analysis and long historical time series | Longer revisit intervals than geostationary weather sources |
 
-For a general Copernicus image, start with **Sentinel-2 L2A · True color**.
+New installations start with **Sentinel-2 Mosaics · Sentinel-2 Quarterly Mosaics ·
+True Color Cloudless**. Select **Sentinel-2 L2A · True color** for a recent
+individual acquisition or finer local detail.
 Map zoom describes the requested geographic extent, not the optical zoom of a
 continuous global photograph. At a small map zoom, a Sentinel-2 overpass can
 occupy only a tiny part of the output. This is especially noticeable with
@@ -294,8 +296,8 @@ bundled snapshot of the official Copernicus Browser catalogue. **Refresh
 Copernicus catalogue** queries the live STAC Catalog API for every acquisition
 date available at the current latitude/longitude and selection. **Latest
 available** is the default and is resolved again before each image download.
-The initial Browser selection is Sentinel-2 with Sentinel-2 L2A and True color,
-matching the official Browser default.
+The initial Browser selection is Sentinel-2 Mosaics with Sentinel-2 Quarterly
+Mosaics and True Color Cloudless. Saved user selections remain unchanged.
 The **Mosaic brightness** slider applies only to Sentinel-1 and Sentinel-2
 mosaic layers. Its 100% setting uses the normal rendering; 25-200% in 5% steps
 adjusts the selected profile without changing other image sources. Sentinel-2

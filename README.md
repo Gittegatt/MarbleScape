@@ -108,6 +108,8 @@ Still-image sources default to GeoColor, GeoColour, natural color, or true color
 where available. Solar uses a wavelength channel because natural color does not
 apply to the Sun. Copernicus rendering requires a free Sentinel Hub OAuth client
 from the Copernicus Data Space account settings.
+New Copernicus settings select Sentinel-2 Mosaics, Sentinel-2 Quarterly Mosaics,
+and True Color Cloudless. Saved selections stay as configured.
 
 Provider-specific satellites, missions, layers, projections, coverage modes,
 cloud filtering, mosaic brightness, lookback behavior, and selection matrices are documented in

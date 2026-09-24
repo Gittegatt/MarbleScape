@@ -589,8 +589,14 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertFalse(settings.eumetsat_frame.winfo_manager())
         self.assertFalse(settings._area_combo.winfo_manager())
         self.assertEqual(len(cop._configuration_combo["values"]), 13)
-        self.assertEqual(cop._mission_var.get(), "Sentinel-2")
+        self.assertEqual(cop._mission_var.get(), "Sentinel-2 Mosaics")
+        self.assertEqual(cop.get_profile()["product"], "MARBLESCAPE::S2-QUARTERLY")
+        self.assertEqual(cop.get_profile()["layer"], "TRUE_COLOR_CLOUDLESS")
+        cop._mission_var.set("Sentinel-2")
+        cop._select_mission()
         self.assertEqual(cop.get_profile()["product"], "DEFAULT-THEME::a91f72")
+        cop._coverage_var.set("Fill gaps with earlier imagery (use latest imagery of valid lookback)")
+        cop._select_coverage()
         self.assertEqual(cop._zoom_combo["values"], tuple(str(value) for value in range(7, 19)))
         self.assertEqual(cop.get_profile()["date"], "latest")
         self.assertEqual(cop.get_profile()["coverage_mode"], "fill_gaps")
@@ -674,7 +680,7 @@ class SourceSettingsTests(unittest.TestCase):
                 self.root.update()
                 time.sleep(0.01)
         self.assertEqual(copernicus._activity.completion.get(), "Completed.")
-        self.assertIn("2026-09-21", copernicus._date_combo["values"])
+        self.assertIn("2026 Q3", copernicus._date_combo["values"])
 
         missing = self.make_settings("copernicus")
         with self.assertRaises(ValueError):
@@ -734,7 +740,7 @@ class SourceSettingsTests(unittest.TestCase):
                 self.root.update()
                 time.sleep(0.01)
         self.assertEqual(cop_client.return_value.list_dates.call_count, 3)
-        self.assertIn("2026-09-20", settings.copernicus_settings._date_combo["values"])
+        self.assertIn("2026 Q3", settings.copernicus_settings._date_combo["values"])
         self.assertIn("using cached catalogue data", settings.copernicus_settings._status_var.get())
 
     def test_active_storm_category_selects_and_commits_first_storm(self):
