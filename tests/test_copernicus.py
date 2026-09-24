@@ -660,6 +660,19 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(len(border_requests), 1)
         self.assertIn("/18/1/1.pbf", border_requests[0])
 
+    def test_map_tile_cache_retains_compressed_tiles_without_losing_pixels(self):
+        client = copernicus.CopernicusClient()
+        tile = Image.new("RGBA", (256, 256), (20, 90, 140, 255))
+        tile.putpixel((10, 20), (255, 0, 0, 255))
+        key = ("map", 5, 2, 3)
+        client._store_tile(key, tile)
+        encoded = client._tile_cache[key]
+        self.assertIsInstance(encoded, bytes)
+        self.assertLess(len(encoded), 256 * 256 * 4)
+        self.assertEqual(client._load_cached_tile(key).getpixel((10, 20)),
+                         (255, 0, 0, 255))
+        self.assertEqual(copernicus.TILE_CACHE_LIMIT, 256)
+
     def test_nodata_background_and_labels_are_independent(self):
         client = copernicus.CopernicusClient("id", "secret")
         satellite = Image.new("RGBA", (4, 4), (0, 0, 0, 0))

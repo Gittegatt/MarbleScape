@@ -143,11 +143,16 @@ minutes = 0
 
 [windows]
 set_wallpaper = true
-position = "fit"                # center, tile, stretch, fit, fill, or span
+position = "fit"                # center, tile, stretch, fit, fill, span, or none
+monitor_positions = "{}"       # Per-monitor overrides are saved by the settings dialog.
+monitor_output_settings = "{}" # Per-monitor size, quality and color overrides.
 pause_on_error = true
 
 [display]
 time_zone = "system"            # system (recommended) or utc; display only
+
+[updates]
+skipped_version = ""            # Latest release dismissed from the startup notice.
 
 [profile_list]
 visible_columns = ["name", "source", "selection", "time", "location", "latitude", "longitude", "coverage"]

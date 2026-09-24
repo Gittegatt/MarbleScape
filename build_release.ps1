@@ -6,6 +6,14 @@ param(
 $ErrorActionPreference = "Stop"
 
 $projectRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
+$versionOutput = & $PythonCommand -c 'import sys; sys.path.insert(0, sys.argv[1]); from app_version import VERSION; print(VERSION)' $projectRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to read the MarbleScape application version."
+}
+$appVersion = ($versionOutput | Select-Object -Last 1).Trim()
+if ($appVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid MarbleScape application version: $appVersion"
+}
 $releaseRoot = [System.IO.Path]::GetFullPath(
     (Join-Path $projectRoot "release")
 )
@@ -16,7 +24,7 @@ $windowsPackageDirectory = [System.IO.Path]::GetFullPath(
     (Join-Path $releaseRoot "MarbleScape-windows-x64")
 )
 $sourceArchive = Join-Path $releaseRoot "MarbleScape-source.zip"
-$windowsArchive = Join-Path $releaseRoot "MarbleScape-windows-x64.zip"
+$windowsArchive = Join-Path $releaseRoot ("MarbleScape-windows-x64_v" + $appVersion + ".zip")
 $checksumsPath = Join-Path $releaseRoot "SHA256SUMS.txt"
 $rootExecutable = Join-Path $projectRoot "marblescape.exe"
 $thirdPartyLicenceNames = @(
@@ -193,6 +201,19 @@ try {
         )
     }
 
+    & $PythonCommand -c (
+        'import sys,tomllib;from pathlib import Path;' +
+        'sys.path.insert(0,sys.argv[1]);' +
+        'from marblescape_source_defaults import AUTO_RESOLUTION_PROVIDERS,DEFAULT_SOURCE_PROFILES;' +
+        'settings=tomllib.loads((Path(sys.argv[1])/"marblescape_config.example.toml").read_text(encoding="utf-8"));' +
+        'wrong=[name for name in AUTO_RESOLUTION_PROVIDERS if settings.get("sources",{}).get(name,{}).get("resolution")!="auto" or DEFAULT_SOURCE_PROFILES[name]["resolution"]!="auto"];' +
+        'print("Non-automatic source defaults: "+", ".join(wrong) if wrong else "All source resolution defaults are automatic.");' +
+        'sys.exit(bool(wrong))'
+    ) $projectRoot
+    if ($LASTEXITCODE -ne 0) {
+        throw "The release configuration must default every source resolution to auto."
+    }
+
     $pythonArchitecture = & $PythonCommand -c 'import platform,struct;print(platform.machine()+chr(58)+str(struct.calcsize(bytes((80,)))*8))'
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to determine the Python architecture."
@@ -331,6 +352,7 @@ try {
         "marblescape_copernicus_settings.py",
         "marblescape_copernicus_catalog.json",
         "marblescape_source_layout.py",
+        "marblescape_source_defaults.py",
         "marblescape_source_settings.py",
         "marblescape_cache.py",
         "marblescape_profiles.py",
@@ -461,6 +483,14 @@ try {
 
     Remove-Item -LiteralPath $sourcePackageDirectory -Recurse -Force
     Remove-Item -LiteralPath $windowsPackageDirectory -Recurse -Force
+
+    foreach ($oldArchive in @(Get-ChildItem -LiteralPath $releaseRoot -File -Filter "MarbleScape-windows-x64*.zip")) {
+        if ($oldArchive.FullName -ne $windowsArchive) {
+            Assert-ChildPath -Parent $releaseRoot -Candidate $oldArchive.FullName
+            Assert-NotReparsePoint -Path $oldArchive.FullName
+            Remove-Item -LiteralPath $oldArchive.FullName -Force
+        }
+    }
 
     Write-Host "Release archives created:"
     Write-Host "  $sourceArchive"

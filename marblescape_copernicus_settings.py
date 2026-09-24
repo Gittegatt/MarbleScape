@@ -42,7 +42,7 @@ LOOKBACK_PERIODS = {
     550: "1.5 years", 730: "2 years", 920: "2.5 years", 1095: "3 years",
 }
 LOOKBACK_LABELS = {
-    (f"{days} days".ljust(11) + " | " + LOOKBACK_PERIODS[days]
+    (f"{days} days ({LOOKBACK_PERIODS[days]})"
      if days in LOOKBACK_PERIODS else f"{days} days"): days
     for days in LOOKBACK_DAYS
 }

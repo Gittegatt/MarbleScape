@@ -235,6 +235,16 @@ class SourceSettingsTests(unittest.TestCase):
         self.wait_for_catalogue(settings)
         self.assertEqual(settings.get_selection()[1]["goes_east"]["resolution"], "auto")
 
+    def test_every_new_resolution_source_starts_on_automatic(self):
+        settings = self.make_settings("goes_east", profiles={})
+        for provider in ("goes_east", "goes_west", "solar", "himawari", "slider", "worldview"):
+            with self.subTest(provider=provider):
+                if provider != "goes_east":
+                    self.select_provider(settings, provider)
+                self.wait_for_catalogue(settings)
+                self.assertEqual(settings._resolution_var.get(), "Automatic (recommended)")
+                self.assertEqual(settings.get_selection()[1][provider]["resolution"], "auto")
+
     def test_himawari_auto_default_and_catalogue_activity(self):
         settings = self.make_settings("himawari")
         self.assertTrue(settings._catalogue_activity.active)
@@ -591,11 +601,11 @@ class SourceSettingsTests(unittest.TestCase):
         self.assertEqual(cop.get_profile()["max_cloud_cover"], 15)
         lookback_values = cop._lookback_combo["values"]
         self.assertEqual(lookback_values[:4], ("3 days", "7 days", "14 days", "21 days"))
-        self.assertEqual(lookback_values[4], "30 days     | 1 month")
-        self.assertEqual(lookback_values[7], "90 days     | 3 months")
-        self.assertEqual(lookback_values[8], "120 days    | 4 months")
-        self.assertEqual(lookback_values[-1], "1095 days   | 3 years")
-        self.assertEqual({value.index("|") for value in lookback_values[4:]}, {12})
+        self.assertEqual(lookback_values[4], "30 days (1 month)")
+        self.assertEqual(lookback_values[7], "90 days (3 months)")
+        self.assertEqual(lookback_values[8], "120 days (4 months)")
+        self.assertEqual(lookback_values[-1], "1095 days (3 years)")
+        self.assertTrue(all("|" not in value for value in lookback_values))
         cop._lookback_var.set(lookback_values[-1])
         self.assertEqual(cop.get_profile()["lookback_days"], 1095)
         cop._lookback_var.set(lookback_values[2])

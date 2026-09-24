@@ -135,19 +135,28 @@ chooses the first listed storm area. Apply saves that active selection.
 
 **Refresh all catalogues**, to the left of Refresh catalogue, refreshes all
 NOAA, Himawari, CIRA SLIDER, NASA Worldview, and EUMETSAT metadata with progress and error reporting.
-It can take a while. MarbleScape refreshes these catalogues at application
-startup. On source selection, saved catalogue entries appear immediately when
+It can take a while. At application startup, MarbleScape reuses complete NOAA,
+Himawari, CIRA SLIDER, NASA Worldview, and EUMETSAT catalogues for up to 24
+hours after each source's last successful online check. Expired sources are
+checked separately. If a source is unavailable, its complete saved catalogue
+remains usable and another automatic online attempt is postponed for one hour.
+A manual refresh can retry immediately.
+**Refresh catalogue** and **Refresh all catalogues** always request an online
+check immediately.
+On source selection, saved catalogue entries appear immediately when
 available; use **Refresh catalogue** to request a new online check. The last
 successful metadata is also stored in
 `content/catalogues.json`. If a provider is unavailable or returns an
 incomplete catalogue, MarbleScape reports the problem and uses this disk cache
 when it contains the requested source. Successful remote results are compared
-with the local values first; identical catalogues do not rewrite the cache.
+with the local values first; unchanged catalogue entries are kept while each
+source's check time is recorded.
 After a NOAA failure, cached GOES-East, GOES-West, and Solar selections remain
 editable. Automatic source resolution is the default for both GOES satellites.
-NOAA area metadata expires after five
-minutes; product lists and Himawari metadata retain their provider-level memory
-caches between explicit refreshes.
+Within a running NOAA client, area metadata has a five-minute memory lifetime
+and product lists have a one-day memory lifetime. The persisted 24-hour startup
+window is separate from these in-memory limits. Himawari metadata retains its
+provider-level memory cache between explicit refreshes.
 When Copernicus OAuth credentials are configured, startup also refreshes and
 caches the acquisition dates for the saved Copernicus location and selection.
 Selecting Copernicus refreshes that location-specific date list again. Its
@@ -268,8 +277,9 @@ large WMS response times out or is rejected upstream, select a smaller Render
 resolution. A failed request keeps the previous wallpaper.
 
 **Refresh catalogue** reloads the NASA GIBS capabilities for this source.
-The startup and **Refresh all catalogues** jobs also warm this metadata without
-downloading imagery pixels. The capabilities catalogue is cached for one hour;
+The startup job checks this metadata when its persisted 24-hour cache has
+expired; **Refresh all catalogues** checks it immediately. Neither job downloads
+imagery pixels. The capabilities catalogue is also cached in memory for one hour;
 the newest time for the selected layer is checked independently during normal
 image checks. A small bundled true-color fallback keeps a saved
 selection visible during a catalogue outage, but a live GIBS connection is

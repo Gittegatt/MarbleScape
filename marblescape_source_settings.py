@@ -11,15 +11,17 @@ from tkinter import ttk
 from marblescape_catalogues import CatalogueClient
 from marblescape_catalogue_activity import CatalogueActivity
 from marblescape_noaa import NOAAClient
-from marblescape_copernicus import DEFAULT_PROFILE as DEFAULT_COPERNICUS_PROFILE, normalize_profile as normalize_copernicus_profile
+from marblescape_copernicus import (
+    DEFAULT_PROFILE as DEFAULT_COPERNICUS_PROFILE,
+    normalize_profile as normalize_copernicus_profile,
+)
 from marblescape_copernicus_settings import CopernicusSettings
 from marblescape_eumetsat import (
-    DEFAULT_PROFILE as DEFAULT_EUMETSAT_PROFILE,
     EumetsatSettings,
     normalize_profile as normalize_eumetsat_profile,
 )
 from marblescape_source_layout import SOURCE_COMBO_WIDTH, configure_source_columns
-from marblescape_worldview import DEFAULT_PROFILE as DEFAULT_WORLDVIEW_PROFILE
+from marblescape_source_defaults import default_source_profiles
 
 
 PROVIDER_LABELS = {
@@ -48,16 +50,7 @@ def image_source_label(provider):
     return IMAGE_SOURCE_CHOICES["goes"] if provider in GOES_SATELLITES else IMAGE_SOURCE_CHOICES[provider]
 
 
-DEFAULT_PROFILES = {
-    "eumetsat": dict(DEFAULT_EUMETSAT_PROFILE),
-    "goes_east": {"area": "full_disk", "product": "GEOCOLOR", "resolution": "auto"},
-    "goes_west": {"area": "full_disk", "product": "GEOCOLOR", "resolution": "auto"},
-    "solar": {"area": "sun", "product": "Fe171", "resolution": "auto"},
-    "himawari": {"area": "nict_full_disk", "product": "true_color", "resolution": "auto"},
-    "slider": {"area": "goes-19---full_disk", "product": "geocolor", "resolution": "auto"},
-    "copernicus": dict(DEFAULT_COPERNICUS_PROFILE),
-    "worldview": dict(DEFAULT_WORLDVIEW_PROFILE),
-}
+DEFAULT_PROFILES = default_source_profiles()
 
 CATALOGUE_PROVIDERS = frozenset(
     ("goes_east", "goes_west", "solar", "himawari", "slider", "worldview")
@@ -427,13 +420,13 @@ class SourceSettings:
         )
         self._resolution_hint.configure(
             text=("Each CIRA source size selects a tile-pyramid level. Larger levels retain more detail "
-                  "but require more separate tile downloads. Automatic selects the smallest useful level."
+                  "but require more separate tile downloads. Automatic uses active monitors in a multi-display setup."
                   if self._provider == "slider" else
                   "NASA GIBS renders the selected global layer at this size. The output size and image "
-                  "placement are configured below; Automatic selects the smallest useful size."
+                  "placement are configured under General > Output. Automatic uses active monitors in a multi-display setup."
                   if self._provider == "worldview" else
                   "Larger source images retain more detail when zooming or cropping. "
-                  "Automatic follows Output, fit/crop and zoom. Desktop size is set below; "
+                  "Automatic uses active monitors in a multi-display setup, plus fit/crop and zoom. "
                   "Render quality controls EUMETSAT WMS supersampling.")
         )
         if is_copernicus:
@@ -444,7 +437,9 @@ class SourceSettings:
         if self._provider == "eumetsat":
             self._loading = False
             status = getattr(self._client, "catalogue_refresh_status", {}) or {}
-            self.eumetsat_settings.refresh(not bool(status.get("running")))
+            use_cache = getattr(self._client, "catalogue_cached_for_automatic_use", None)
+            cached = callable(use_cache) and use_cache("eumetsat")
+            self.eumetsat_settings.refresh(not bool(status.get("running")) and not cached)
             return
         if not is_catalogue:
             self._loading = False

@@ -1104,17 +1104,14 @@ class CopernicusClient:
     def _cached_map_tile(self, template, zoom, x, y):
         DOWNLOAD_PROGRESS.raise_if_cancelled()
         key = (template, zoom, x, y)
-        with self._tile_cache_lock:
-            cached = self._tile_cache.get(key)
-            if cached is not None:
-                return cached.copy(), 0
+        cached = self._load_cached_tile(key)
+        if cached is not None:
+            return cached, 0
         source_zoom = min(zoom, GISCO_MAX_NATIVE_ZOOM)
         factor = 2 ** (zoom - source_zoom)
         source_x, source_y = x // factor, y // factor
         source_key = (template, source_zoom, source_x, source_y)
-        with self._tile_cache_lock:
-            source_value = self._tile_cache.get(source_key)
-            source_value = source_value.copy() if source_value is not None else None
+        source_value = self._load_cached_tile(source_key)
         downloaded = 0
         if source_value is None:
             request = urllib.request.Request(
@@ -1136,10 +1133,24 @@ class CopernicusClient:
         self._store_tile(key, value)
         return value, downloaded
 
+    def _load_cached_tile(self, key):
+        with self._tile_cache_lock:
+            encoded = self._tile_cache.get(key)
+        if encoded is None:
+            return None
+        with Image.open(io.BytesIO(encoded)) as image:
+            return image.convert("RGBA")
+
     def _store_tile(self, key, value):
         with self._tile_cache_lock:
+            if key in self._tile_cache:
+                return
+        buffer = io.BytesIO()
+        value.save(buffer, format="PNG")
+        encoded = buffer.getvalue()
+        with self._tile_cache_lock:
             if key not in self._tile_cache:
-                self._tile_cache[key] = value.copy()
+                self._tile_cache[key] = encoded
                 self._tile_cache_order.append(key)
                 while len(self._tile_cache_order) > TILE_CACHE_LIMIT:
                     old = self._tile_cache_order.pop(0)
@@ -1148,17 +1159,14 @@ class CopernicusClient:
     def _cached_border_tile(self, template, zoom, x, y):
         DOWNLOAD_PROGRESS.raise_if_cancelled()
         key = (template, zoom, x, y)
-        with self._tile_cache_lock:
-            cached = self._tile_cache.get(key)
-            if cached is not None:
-                return cached.copy(), 0
+        cached = self._load_cached_tile(key)
+        if cached is not None:
+            return cached, 0
         source_zoom = min(zoom, GISCO_MAX_NATIVE_ZOOM)
         factor = 2 ** (zoom - source_zoom)
         source_x, source_y = x // factor, y // factor
         source_key = (template, source_zoom, source_x, source_y)
-        with self._tile_cache_lock:
-            source_value = self._tile_cache.get(source_key)
-            source_value = source_value.copy() if source_value is not None else None
+        source_value = self._load_cached_tile(source_key)
         downloaded = 0
         if source_value is None:
             request = urllib.request.Request(
