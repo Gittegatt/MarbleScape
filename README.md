@@ -161,7 +161,10 @@ Rotation can cycle through profiles at a selected interval while ordinary image
 checks continue between profile changes.
 
 The profile table displays Profile name, Source, Selection, Time,
-Area/location, Lat, Long, and Coverage mode. Right-click a value to copy that
+Area/location, Lat, Long, Gap Fill, Cloud Coverage, and Mosaic brightness.
+The last two columns show saved Copernicus percentages (a dash for other
+sources); a selected layer may not support the cloud filter or mosaic brightness.
+Right-click a value to copy that
 cell or the complete row. `Ctrl+C` copies the selected row as tab-separated
 text. Right-click a column heading to show or hide columns. **Apply**, **OK**,
 or **Apply profile** saves the selected columns in `marblescape_config.toml`.

@@ -26,7 +26,7 @@ _PRESET_LABELS = {"full_earth": "Full Earth", "europe": "Europe",
                   "custom": "Custom"}
 PROFILE_LIST_COLUMNS = (
     "name", "source", "selection", "time", "location", "latitude", "longitude",
-    "coverage",
+    "gap_fill", "cloud_coverage", "mosaic_brightness",
 )
 PROFILE_LIST_COLUMN_LABELS = {
     "name": "Profile name",
@@ -36,7 +36,9 @@ PROFILE_LIST_COLUMN_LABELS = {
     "location": "Area / location",
     "latitude": "Lat",
     "longitude": "Long",
-    "coverage": "Coverage mode",
+    "gap_fill": "Gap Fill",
+    "cloud_coverage": "Cloud Coverage",
+    "mosaic_brightness": "Mosaic brightness",
 }
 
 
@@ -156,6 +158,14 @@ def _profile_coverage(settings):
     elif provider == "eumetsat" and profile.get("fill_gaps"):
         return f"Gap fill · {_text(profile.get('gap_fill_lookback_hours', 12))} h"
     return "-"
+
+
+def _profile_copernicus_percentage(settings, field):
+    if settings.get("source", {}).get("provider") != "copernicus":
+        return "-"
+    profile = settings.get("sources", {}).get("copernicus", {})
+    default = 30 if field == "max_cloud_cover" else 100
+    return f"{profile.get(field, default)}%"
 
 
 def _fixed_profile_date(settings):
@@ -308,7 +318,9 @@ class ProfilesSettings:
         self.tree.column("location", width=150, minwidth=45, stretch=False)
         self.tree.column("latitude", width=90, minwidth=45, stretch=False)
         self.tree.column("longitude", width=90, minwidth=45, stretch=False)
-        self.tree.column("coverage", width=170, minwidth=45, stretch=False)
+        self.tree.column("gap_fill", width=170, minwidth=45, stretch=False)
+        self.tree.column("cloud_coverage", width=120, minwidth=45, stretch=False)
+        self.tree.column("mosaic_brightness", width=135, minwidth=45, stretch=False)
         self.tree.grid(row=0, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -522,7 +534,9 @@ class ProfilesSettings:
                 _profile_selection(settings), _profile_time(
                     settings, metadata, self._runtime.get("display_time_zone", "system")
                 ), _profile_location(settings), _profile_latitude(settings),
-                _profile_longitude(settings), _profile_coverage(settings))
+                _profile_longitude(settings), _profile_coverage(settings),
+                _profile_copernicus_percentage(settings, "max_cloud_cover"),
+                _profile_copernicus_percentage(settings, "brightness"))
 
     def _detail_values(self, item):
         settings = item["settings"]

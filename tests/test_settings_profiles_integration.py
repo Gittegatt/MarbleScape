@@ -311,8 +311,13 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
                 app.read_profile_library_file(context.directory / "profiles.toml"),
                 saved_library,
             )
-            for section in ("source", "sources", "layers"):
+            for section in ("source", "layers"):
                 self.assertEqual(after[section], expected[section])
+            expected_sources = deepcopy(expected["sources"])
+            expected_sources["copernicus"]["gap_fill_mode"] = (
+                expected_sources["copernicus"].pop("coverage_mode")
+            )
+            self.assertEqual(after["sources"], expected_sources)
             for section in ("view", "output"):
                 for name, value in expected[section].items():
                     self.assertEqual(after[section][name], value, f"{section}.{name}")

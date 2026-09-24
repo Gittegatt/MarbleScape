@@ -586,6 +586,7 @@ class SourceSettingsTests(unittest.TestCase):
         )
         cop = settings.copernicus_settings
         self.assertTrue(cop.frame.winfo_manager())
+        self.assertEqual(cop.frame.grid_slaves(row=9, column=0)[0].cget("text"), "Gap Fill")
         self.assertFalse(settings.eumetsat_frame.winfo_manager())
         self.assertFalse(settings._area_combo.winfo_manager())
         self.assertEqual(len(cop._configuration_combo["values"]), 13)

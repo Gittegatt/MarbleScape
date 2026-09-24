@@ -65,7 +65,7 @@ latitude = 51.1657
 longitude = 10.4515
 map_zoom = 7
 map_labels = true
-coverage_mode = "single"
+gap_fill_mode = "single"
 # Supported maximum lookback values: 3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 550, 730, 920, or 1095 days.
 lookback_days = 14
 # Optical layers: maximum tile cloud cover, 0-100 in 5% steps. Unsupported layers ignore it.
@@ -155,7 +155,8 @@ time_zone = "system"            # system (recommended) or utc; display only
 skipped_version = ""            # Latest release dismissed from the startup notice.
 
 [profile_list]
-visible_columns = ["name", "source", "selection", "time", "location", "latitude", "longitude", "coverage"]
+columns_version = 2
+visible_columns = ["name", "source", "selection", "time", "location", "latitude", "longitude", "gap_fill", "cloud_coverage", "mosaic_brightness"]
 
 # These WMS layers apply only to EUMETSAT and are retained for later use.
 # Friendly basemap choices. Normally enable exactly one.

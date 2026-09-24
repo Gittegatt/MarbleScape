@@ -339,7 +339,7 @@ Sentinel-3 products, 3-19 for Sentinel-5P, 7-18 for Landsat, and 7-25 for DEM.
 The provider currently restricts COPERNICUS_30 DEM access to authorized CCM
 users; COPERNICUS_90 remains the unrestricted DEM default on the service.
 
-The Process API renders the selected official evalscript. **Coverage mode**
+The Process API renders the selected official evalscript. **Gap Fill**
 offers a single latest acquisition, black no-data areas, or a gap-filling
 composite. Gap filling uses the most recent valid pixel from the selected 3,
 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 550, 730, 920, or 1095-day
@@ -357,7 +357,7 @@ request, but it adds API requests and cannot create imagery where none exists.
 **Map labels** adds the GISCO/OpenStreetMap place, road, POI, and boundary
 overlay for regular Copernicus layers and all Sentinel-1/Sentinel-2 mosaic
 products. The overlay is independent of the satellite pixels. The black
-coverage mode keeps transparent no-data pixels black.
+Gap Fill option keeps transparent no-data pixels black.
 Attribution is written into
 generated images whenever map tiles are used.
 
@@ -365,7 +365,7 @@ The word **Cloudless** describes the mosaic processing, not a guarantee that
 every output pixel will be visually clear. Quarterly mosaics can contain
 transparent No Data where no valid cloud-free observation exists, as well as
 residual clouds, snow, over-bright terrain on steep slopes, or source-tile
-seams. With the standard mosaic coverage mode, transparent pixels reveal the
+seams. With the standard mosaic Gap Fill setting, transparent pixels reveal the
 map background. Compare the selected period in the
 [Copernicus Browser](https://browser.dataspace.copernicus.eu/) when determining
 whether a white area belongs to the source mosaic.

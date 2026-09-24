@@ -138,7 +138,7 @@ class CopernicusSettings:
         self._longitude_entry = self._entry(7, "Longitude", self._longitude_var)
         self._zoom_combo = self._combo(8, "Map zoom", self._zoom_var)
         self._coverage_combo = self._combo(
-            9, "Coverage mode", self._coverage_var, tuple(COVERAGE_LABELS)
+            9, "Gap Fill", self._coverage_var, tuple(COVERAGE_LABELS)
         )
         self._lookback_combo = self._combo(
             10, "Maximum lookback", self._lookback_var, tuple(LOOKBACK_LABELS)

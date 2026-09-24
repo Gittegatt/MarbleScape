@@ -250,7 +250,25 @@ class SourceRuntimeTests(unittest.TestCase):
         app.load_configuration(config)
         self.assertEqual(
             app.PROFILE_LIST_VISIBLE_COLUMNS,
-            ("name", "location", "latitude", "longitude"),
+            ("name", "location", "latitude", "longitude",
+             "cloud_coverage", "mosaic_brightness"),
+        )
+
+        config.write_text(
+            '[profile_list]\ncolumns_version = 2\n'
+            'visible_columns = ["name", "gap_fill"]\n', encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "gap_fill"))
+
+        config.write_text(
+            '[profile_list]\nvisible_columns = ["name", "coverage"]\n',
+            encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(
+            app.PROFILE_LIST_VISIBLE_COLUMNS,
+            ("name", "gap_fill", "cloud_coverage", "mosaic_brightness"),
         )
 
         older = '[source]\nprovider = "eumetsat"\n'
@@ -265,6 +283,22 @@ class SourceRuntimeTests(unittest.TestCase):
             tomllib.loads(updated)["profile_list"]["visible_columns"],
             ["name", "latitude", "longitude"],
         )
+
+    def test_copernicus_gap_fill_configuration_key_roundtrips(self):
+        config = self.root / "gap-fill.toml"
+        config.write_text(
+            '[sources.copernicus]\ngap_fill_mode = "fill_gaps"\n'
+            'mission = "Sentinel-2"\nproduct = "DEFAULT-THEME::a91f72"\n'
+            'layer = "1_TRUE_COLOR"\nlookback_days = 30\n', encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(app.SOURCE_PROFILES["copernicus"]["coverage_mode"], "fill_gaps")
+        updated = app.replace_source_configuration(
+            config.read_text(encoding="utf-8"), "copernicus", app.SOURCE_PROFILES,
+        )
+        self.assertEqual(tomllib.loads(updated)["sources"]["copernicus"]["gap_fill_mode"],
+                         "fill_gaps")
+        self.assertNotIn("coverage_mode", tomllib.loads(updated)["sources"]["copernicus"])
 
     def test_source_defaults_and_normalized_profiles_are_independent_copies(self):
         provider, first = app.normalize_source_configuration("eumetsat", {})
@@ -748,10 +782,20 @@ class SourceRuntimeTests(unittest.TestCase):
         updated = app.replace_source_configuration(existing, "solar", profiles)
         parsed = tomllib.loads(updated)
         self.assertEqual(parsed["source"]["provider"], "solar")
-        self.assertEqual(parsed["sources"], profiles)
+        self.assertEqual(parsed["sources"]["copernicus"]["gap_fill_mode"],
+                         profiles["copernicus"]["coverage_mode"])
+        self.assertNotIn("coverage_mode", parsed["sources"]["copernicus"])
+        self.assertEqual(
+            {key: value for key, value in parsed["sources"].items()
+             if key != "copernicus"},
+            {key: value for key, value in profiles.items()
+             if key != "copernicus"},
+        )
         self.assertEqual(parsed["service"]["endpoint"], "https://example.invalid/wms")
         self.assertEqual(parsed["layers"][0]["name"], "existing:layer")
         self.assertIn("# Keep this comment.", updated)
+        self.assertNotIn("coverage_mode =", updated)
+        self.assertIn("gap_fill_mode =", updated)
         repeated = app.replace_source_configuration(updated, "solar", profiles)
         self.assertEqual(tomllib.loads(repeated), parsed)
         updates = app.source_configuration_updates("solar", profiles)
@@ -880,7 +924,9 @@ class SourceRuntimeTests(unittest.TestCase):
         self.assertFalse(startup)
         self.assertEqual(restored_profiles, app.IMAGE_PROFILE_LIBRARY)
         self.assertEqual(restored, updated)
-        self.assertEqual(payload["settings"]["sources"], profiles)
+        self.assertEqual(
+            payload["settings"]["sources"], tomllib.loads(updated)["sources"],
+        )
         app.IMAGE_SOURCE = "solar"
         app.load_configuration(app.ACTIVE_CONFIG_PATH)
         self.assertEqual(app.IMAGE_SOURCE, "goes_west")

@@ -262,21 +262,25 @@ These changes remain drafts until **Apply** or **OK**; Cancel discards drafts.
 Loading a profile fills the Image form; Apply requests its image.
 
 The profile list shows **Profile name**, **Source**, **Selection**, **Time**,
-**Area / location**, **Lat**, **Long**, and **Coverage mode** in that order.
+**Area / location**, **Lat**, **Long**, **Gap Fill**, **Cloud Coverage**, and
+**Mosaic brightness** in that order.
 Scroll horizontally to see the rightmost columns in the normal-sized Settings
 window. Copernicus shows the saved highlight or `Custom Lat/Long` in the area
 column and places its coordinates in the separate Lat and Long columns. Other
-sources show their area or preset and a dash for both coordinates. Coverage
-mode shows the Copernicus selection and its
-gap-fill lookback, or enabled EUMETSAT gap filling. A dash means the source has
-no applicable coverage setting. The successfully applied rotation entry is
+sources show their area or preset and a dash for both coordinates. Gap Fill
+shows the Copernicus selection and its lookback, or enabled EUMETSAT gap
+filling. Cloud Coverage and Mosaic brightness show saved Copernicus percentages;
+they show a dash for other sources. A selected Copernicus layer may ignore an
+unsupported cloud filter or brightness adjustment. The successfully applied
+rotation entry is
 marked **Active**. Right-click a value to copy that cell or its complete row;
 `Ctrl+C` copies the selected row as tab-separated text. Right-click a column
 heading to show or hide individual columns. At least one column remains visible,
 and heading separators can be dragged to resize columns without automatic
 stretching them back during list or window updates. Column visibility is persistent,
 and **Apply** or **OK** saves the selection in `marblescape_config.toml` under
-`[profile_list]`. Latest
+`[profile_list].visible_columns` (schema version 2). The Copernicus Gap Fill
+choice is stored as `[sources.copernicus].gap_fill_mode`. Latest
 profiles show the acquisition time of their last successfully used provider
 image in the global display time zone, for example
 `Latest · YYYY-MM-DD HH:MM UTC+02:00`, or `Latest · not loaded yet` before their

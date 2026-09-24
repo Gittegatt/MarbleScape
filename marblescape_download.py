@@ -227,7 +227,7 @@ DEFAULT_DOWNLOAD_RETRIES = 2
 DEFAULT_CATALOGUE_RETRIES = 2
 DEFAULT_PROFILE_LIST_COLUMNS = (
     "name", "source", "selection", "time", "location", "latitude", "longitude",
-    "coverage",
+    "gap_fill", "cloud_coverage", "mosaic_brightness",
 )
 SHOW_DOWNLOAD_SPEED = DEFAULT_SHOW_DOWNLOAD_SPEED
 DOWNLOAD_SPEED_UNIT = DEFAULT_DOWNLOAD_SPEED_UNIT
@@ -287,7 +287,8 @@ BEST_PRACTICE_TEXT = (
     "a clear preview of the source data before you configure the wallpaper.\n\n"
     "Then transfer the relevant choices to MarbleScape: image source, satellite, "
     "mission, product, layer, projection, area, custom latitude and longitude, zoom, "
-    "date, coverage options, and any other source-specific settings. Under General > "
+    "date, Gap Fill, cloud coverage, mosaic brightness, and any other "
+    "source-specific settings. Under General > "
     "Output, configure the width, height, and aspect ratio for your monitor. Set the "
     "fit mode and wallpaper position for your "
     "monitor. Select Apply, review the resulting wallpaper, and refine the settings "
@@ -1165,9 +1166,13 @@ def load_configuration(config_path):
     if "check_for_updates" in source and type(source["check_for_updates"]) is not bool:
         raise ValueError("source.check_for_updates must be true or false.")
     CHECK_FOR_SOURCE_UPDATES = source.get("check_for_updates", True)
+    configured_profiles = deepcopy(config.get("sources", {}))
+    if isinstance(configured_profiles, dict):
+        copernicus = configured_profiles.get("copernicus")
+        if isinstance(copernicus, dict) and "gap_fill_mode" in copernicus:
+            copernicus["coverage_mode"] = copernicus.pop("gap_fill_mode")
     IMAGE_SOURCE, SOURCE_PROFILES = normalize_source_configuration(
-        source.get("provider", "eumetsat"),
-        config.get("sources", {}),
+        source.get("provider", "eumetsat"), configured_profiles,
     )
     (COPERNICUS_CLIENT_ID, COPERNICUS_CLIENT_SECRET,
      COPERNICUS_CLIENT_SECRET_PROTECTED) = normalize_auth_configuration(
@@ -1224,6 +1229,18 @@ def load_configuration(config_path):
     )
     if not isinstance(configured_columns, list):
         raise ValueError("profile_list.visible_columns must be a list.")
+    columns_version = profile_list.get("columns_version", 1)
+    if type(columns_version) is not int or columns_version not in (1, 2):
+        raise ValueError("profile_list.columns_version must be 1 or 2.")
+    if columns_version == 1 and "visible_columns" in profile_list:
+        configured_columns = [
+            "gap_fill" if column == "coverage" else column
+            for column in configured_columns
+        ]
+        configured_columns.extend(
+            column for column in ("cloud_coverage", "mosaic_brightness")
+            if column not in configured_columns
+        )
     if (
         not configured_columns
         or any(type(column) is not str for column in configured_columns)
@@ -5838,7 +5855,9 @@ def source_configuration_updates(provider, profiles, check_for_updates=None):
             raise ValueError("Image update checking must be true or false.")
         updates.append(("source", "check_for_updates", check_for_updates))
     return updates + [
-        (f"sources.{name}", field, value)
+        (f"sources.{name}",
+         "gap_fill_mode" if name == "copernicus" and field == "coverage_mode" else field,
+         value)
         for name, profile in profiles.items() for field, value in profile.items()
     ]
 
@@ -5852,6 +5871,15 @@ def replace_source_configuration(text, provider, profiles, check_for_updates=Non
         if not re.search(rf"(?m)^\s*\[{re.escape(section)}\]\s*(?:#[^\r\n]*)?$", text):
             text = text.rstrip() + newline * 2 + f"[{section}]" + newline
         text = replace_toml_section_value(text, section, key, value)
+    header = re.search(r"(?m)^\s*\[sources\.copernicus\]\s*(?:#[^\r\n]*)?(?:\r?\n|$)", text)
+    if header:
+        next_header = re.search(r"(?m)^\s*\[", text[header.end():])
+        end = header.end() + next_header.start() if next_header else len(text)
+        section = re.sub(
+            r"(?m)^[ \t]*coverage_mode[ \t]*=[^\r\n]*(?:\r?\n|$)",
+            "", text[header.end():end],
+        )
+        text = text[:header.end()] + section + text[end:]
     return text
 
 
@@ -8455,9 +8483,12 @@ def run_with_windows_tray(argv=None):
                     updated, requested_auth
                 )
                 updated = ensure_profile_list_configuration_section(updated)
-                return replace_toml_section_value(
+                updated = replace_toml_section_value(
                     updated, "profile_list", "visible_columns",
                     list(requested_profile_columns),
+                )
+                return replace_toml_section_value(
+                    updated, "profile_list", "columns_version", 2,
                 )
 
             changed = update_active_configuration_and_profiles(
@@ -9089,9 +9120,12 @@ def run_with_windows_tray(argv=None):
                             updated, requested_copernicus_auth
                         )
                         updated = ensure_profile_list_configuration_section(updated)
-                        return replace_toml_section_value(
+                        updated = replace_toml_section_value(
                             updated, "profile_list", "visible_columns",
                             list(requested_profile_columns),
+                        )
+                        return replace_toml_section_value(
+                            updated, "profile_list", "columns_version", 2,
                         )
 
                     changed = update_active_configuration_and_profiles(

@@ -69,22 +69,27 @@ class ProfileSettingsTests(unittest.TestCase):
         self.assertIn("Solar", str(self.ui.tree.item(SECOND, "values")))
         self.assertEqual(self.ui.tree["columns"],
                          ("name", "source", "selection", "time", "location",
-                          "latitude", "longitude", "coverage"))
+                           "latitude", "longitude", "gap_fill",
+                           "cloud_coverage", "mosaic_brightness"))
+        self.assertEqual(self.ui.tree.heading("gap_fill", "text"), "Gap Fill")
+        self.assertEqual(self.ui.tree.heading("cloud_coverage", "text"), "Cloud Coverage")
+        self.assertEqual(self.ui.tree.heading("mosaic_brightness", "text"), "Mosaic brightness")
         values = self.ui.tree.item(SECOND, "values")
         self.assertEqual(values[0], "Sun · Active")
         self.assertEqual(values[3], "Latest · 2026-09-13 10:20 UTC")
-        self.assertEqual(values[4:], ("Sun", "-", "-", "-"))
+        self.assertEqual(values[4:], ("Sun", "-", "-", "-", "-", "-"))
         self.assertEqual(self.ui.detail_vars["time_utc"].get(), "2026-09-13 10:20 UTC")
 
     def test_profile_rows_show_location_and_coverage_by_source(self):
         copernicus = {"source": {"provider": "copernicus"}, "sources": {"copernicus": {
             "latitude": 19.60508, "longitude": -155.43457,
             "coverage_mode": "single", "lookback_days": 90,
+            "max_cloud_cover": 35, "brightness": 125,
         }}}
         item = {"id": FIRST, "name": "Hawaii", "settings": copernicus}
         self.assertEqual(self.ui._row_values(item)[4:],
                          ("Custom Lat/Long", "19.60508", "-155.43457",
-                          "Single latest acquisition"))
+                           "Single latest acquisition", "35%", "125%"))
         self.assertEqual(_profile_latitude(copernicus), "19.60508")
         self.assertEqual(_profile_longitude(copernicus), "-155.43457")
         copernicus["sources"]["copernicus"]["coverage_mode"] = "black"
