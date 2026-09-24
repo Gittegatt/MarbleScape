@@ -31,7 +31,7 @@ profile rotation, history, and local caching. The downloader also runs on Linux.
 - System-time or UTC timestamp display.
 - JSON backup and restore for configuration and profiles.
 - Windows tray operation, single-instance startup, and per-monitor wallpaper placement.
-- A startup notice for new public GitHub releases, with a per-version skip option.
+- An update notice for new public GitHub releases at startup or from About, with a per-version skip option.
 
 Satellite observations are not seamless photographic maps. Depending on the
 provider and acquisition, imagery can contain clouds, scan seams, missing
@@ -49,6 +49,10 @@ A reviewed prebuilt package supports 64-bit Windows 10 and 11.
 3. Run `marblescape.exe`.
 4. Open the MarbleScape notification-area menu and select `Settings...`.
 5. Choose an image source, review the output settings, and select **Apply**.
+
+Tray **Exit** cancels an active image transfer and waits for the worker to
+finish. **Restart** activates the new instance once the old instance has released
+its single-instance lock; an in-progress provider request may delay this.
 
 The executable is not code-signed, so Windows may show an
 unrecognized-publisher warning. Obtain it from a trusted release and verify its

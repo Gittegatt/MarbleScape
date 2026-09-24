@@ -59,7 +59,14 @@ Buy Me a Coffee. Changes made in Settings are written to the active local TOML f
 applied by the running application without restarting it. A new image is
 requested when required. Double-clicking the tray icon opens Settings.
 Diagnostic and one-shot commands do not show a tray icon. `Restart` remains
-available for troubleshooting.
+available for troubleshooting. Exit requests cancellation of an active image
+transfer and waits for the worker to finish. Restart waits for the old process
+to release the single-instance lock before the new process becomes active,
+even if a provider request takes longer than usual.
+
+Under **About**, **Check for updates** opens the same notice as the startup
+check when a newer public release is available. A manually requested check
+still shows a release that was previously skipped at startup.
 
 The lower menu shows `Checking for new image...`, `Fetching new image...`,
 or `Standing by...`, followed by `Next check` in the selected display time zone.

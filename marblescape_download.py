@@ -3564,7 +3564,8 @@ def acquire_windows_single_instance(wait_seconds=0):
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
     kernel32.CloseHandle.restype = ctypes.c_int
-    deadline = time.monotonic() + max(0, float(wait_seconds))
+    deadline = (None if wait_seconds is None else
+                time.monotonic() + max(0, float(wait_seconds)))
     while True:
         handle = kernel32.CreateMutexW(
             None, False, "Global\\Gittegatt.MarbleScape.7A87D1D4-80E9-4F7E-91EC-DF10A4969899"
@@ -3577,9 +3578,10 @@ def acquire_windows_single_instance(wait_seconds=0):
             kernel32.CloseHandle(handle)
         elif error != 5:
             raise ctypes.WinError(error)
-        if time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() >= deadline:
             return False
-        time.sleep(max(0, min(0.1, deadline - time.monotonic())))
+        time.sleep(0.1 if deadline is None else
+                   max(0, min(0.1, deadline - time.monotonic())))
 
 
 def compose_monitor_wallpaper(source, mode, rect, all_rects, background_color):
@@ -6721,10 +6723,14 @@ def run_with_windows_tray(argv=None):
             except Exception:
                 log(f"Unable to open image folder: {exc}")
 
+    def stop_application(icon):
+        APPLICATION_STOP_EVENT.set()
+        DOWNLOAD_PROGRESS.request_cancel()
+        icon.stop()
+
     def exit_application(icon, item):
         del item
-        APPLICATION_STOP_EVENT.set()
-        icon.stop()
+        stop_application(icon)
 
     def show_tray_error(icon, title, error):
         try:
@@ -6732,11 +6738,13 @@ def run_with_windows_tray(argv=None):
         except Exception:
             log(f"{title}: {error}")
 
-    def run_update_notice_dialog(release):
+    def run_update_notice_dialog(release, parent=None):
         import tkinter as tk
         from tkinter import messagebox, ttk
 
-        root = create_tray_dialog_root(tk)
+        root = tk.Toplevel(parent) if parent is not None else create_tray_dialog_root(tk)
+        if parent is not None:
+            root.transient(parent)
         apply_tk_window_icon(root)
         original_destroy = root.destroy
 
@@ -6800,7 +6808,11 @@ def run_with_windows_tray(argv=None):
         root.deiconify()
         root.attributes("-topmost", True)
         root.after(250, lambda: root.attributes("-topmost", False))
-        root.mainloop()
+        if parent is None:
+            root.mainloop()
+        else:
+            root.grab_set()
+            root.focus_set()
 
     def check_for_startup_update():
         def worker():
@@ -6842,8 +6854,7 @@ def run_with_windows_tray(argv=None):
             show_tray_error(icon, "Unable to restart MarbleScape", exc)
             return False
 
-        APPLICATION_STOP_EVENT.set()
-        icon.stop()
+        stop_application(icon)
         return True
 
     def restart_application(icon, item):
@@ -8851,6 +8862,8 @@ def run_with_windows_tray(argv=None):
                     update_status_var.set(
                         f"Update available: {result['latest']} (installed: {VERSION})."
                     )
+                    if should_show_update_notification(result):
+                        run_update_notice_dialog(result, parent=root)
                 else:
                     update_status_var.set(
                         f"MarbleScape is up to date ({VERSION}); latest public version: "
@@ -9743,7 +9756,8 @@ def run_with_windows_tray(argv=None):
 
     tray_icon.run(setup=tray_setup)
     APPLICATION_STOP_EVENT.set()
-    worker.join(timeout=2.0)
+    DOWNLOAD_PROGRESS.request_cancel()
+    worker.join()
     return result["exit_code"]
 
 
@@ -9753,7 +9767,7 @@ def run_with_windows_tray(argv=None):
 
 
 if __name__ == "__main__":
-    restart_wait = 15 if os.environ.get("MARBLESCAPE_RESTART_WAIT") == "1" else 0
+    restart_wait = None if os.environ.get("MARBLESCAPE_RESTART_WAIT") == "1" else 0
     if not acquire_windows_single_instance(wait_seconds=restart_wait):
         log("MarbleScape is already running.")
         sys.exit(0)

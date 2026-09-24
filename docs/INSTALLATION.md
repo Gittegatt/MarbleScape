@@ -40,6 +40,11 @@ On startup, MarbleScape checks the latest public GitHub release in the
 background. If a newer release exists, a small window offers **Skip this
 version** and **Open GitHub**. Skipping suppresses that release on later starts;
 the next newer release can still be shown.
+The same window opens when **About > Check for updates** finds a newer
+published release, even if its startup notice was skipped. **Exit** requests
+cancellation of an active image transfer and waits for the worker to finish.
+**Restart** waits for the old instance to exit before the new one takes over;
+an in-progress provider request may delay the restart.
 
 ## Run from source
 

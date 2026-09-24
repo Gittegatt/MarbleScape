@@ -209,6 +209,57 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
                 for event, was_set in zip(events, event_states):
                     event.set() if was_set else event.clear()
 
+    def test_about_update_check_opens_the_startup_notice(self):
+        from tkinter import ttk
+
+        release = {
+            "current": app.VERSION,
+            "latest": "v9.9.9",
+            "update_available": True,
+            "url": app.PROJECT_URL + "/releases/tag/v9.9.9",
+        }
+        original_thread = app.threading.Thread
+
+        def immediate_update_thread(*args, **kwargs):
+            if kwargs.get("name") == "MarbleScape-update-check":
+                return SimpleNamespace(start=kwargs["target"])
+            return original_thread(*args, **kwargs)
+
+        def scenario(context):
+            check_button = next(
+                widget for widget in self.descendants(context.root)
+                if isinstance(widget, ttk.Button)
+                and widget.cget("text") == "Check for updates"
+            )
+            check_button.invoke()
+            context.root.update()
+            notice = next(
+                widget for widget in context.root.winfo_children()
+                if isinstance(widget, tk.Toplevel)
+                and widget.title() == "MarbleScape update available"
+            )
+            labels = [
+                widget.cget("text") for widget in self.descendants(notice)
+                if isinstance(widget, ttk.Label)
+            ]
+            self.assertIn("A new MarbleScape version is available.", labels)
+            self.assertIn(f"Installed: v{app.VERSION}    Latest: v9.9.9", labels)
+            buttons = {
+                widget.cget("text"): widget
+                for widget in self.descendants(notice)
+                if isinstance(widget, ttk.Button)
+            }
+            self.assertEqual(set(buttons), {"Skip this version", "Open GitHub"})
+            buttons["Skip this version"].invoke()
+            self.assertFalse(notice.winfo_exists())
+            saved = tomllib.loads(context.config.read_text(encoding="utf-8"))
+            self.assertEqual(saved["updates"]["skipped_version"], "v9.9.9")
+
+        with patch.object(app.threading, "Thread", side_effect=immediate_update_thread), \
+             patch.object(app, "check_github_update", return_value=release), \
+             patch.object(app, "SKIPPED_UPDATE_VERSION", "v9.9.9"):
+            self.run_dialog(scenario)
+
     def test_complete_image_profile_restores_form_and_survives_apply_and_backup(self):
         def scenario(context):
             variables = context.variables

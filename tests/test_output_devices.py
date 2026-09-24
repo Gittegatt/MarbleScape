@@ -406,6 +406,21 @@ class OutputDeviceTests(unittest.TestCase):
             self.assertEqual(app.WINDOWS_SINGLE_INSTANCE_HANDLE, 456)
         close.assert_called_once_with(123)
 
+    @unittest.skipUnless(os.name == "nt", "Windows named mutex")
+    def test_restart_waits_without_a_fixed_deadline(self):
+        create = Mock(side_effect=[123, 123, 456])
+        close = Mock(return_value=1)
+        kernel = SimpleNamespace(CreateMutexW=create, CloseHandle=close)
+        with patch.object(app.ctypes, "WinDLL", return_value=kernel), \
+             patch.object(app.ctypes, "get_last_error", side_effect=[183, 183, 0]), \
+             patch.object(app.time, "monotonic", side_effect=AssertionError("Unexpected deadline")), \
+             patch.object(app.time, "sleep") as sleep, \
+             patch.object(app, "WINDOWS_SINGLE_INSTANCE_HANDLE", None):
+            self.assertTrue(app.acquire_windows_single_instance(wait_seconds=None))
+            self.assertEqual(app.WINDOWS_SINGLE_INSTANCE_HANDLE, 456)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(close.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

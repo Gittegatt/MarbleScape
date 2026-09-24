@@ -6,6 +6,7 @@ import inspect
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 import tomllib
 import unittest
@@ -16,6 +17,46 @@ import marblescape_download as app
 
 @unittest.skipUnless(os.name == "nt", "Windows tray settings integration")
 class SettingsIntegrationTests(unittest.TestCase):
+    def test_restart_cancels_download_and_waits_for_worker(self):
+        import pystray
+
+        worker_finished = threading.Event()
+
+        class FakeIcon:
+            def __init__(self, *args, menu, **kwargs):
+                self.menu = menu
+
+            def run(self, setup):
+                setup(self)
+                self.menu.items[-2]._action(self, None)
+
+            def stop(self):
+                pass
+
+        def run_worker(*args, **kwargs):
+            app.APPLICATION_STOP_EVENT.wait(2)
+            time.sleep(0.03)
+            worker_finished.set()
+            return 0
+
+        try:
+            with patch.object(pystray, "Icon", FakeIcon), \
+                 patch.object(app, "load_configuration"), \
+                 patch.object(app, "run_application", side_effect=run_worker), \
+                 patch.object(app, "warm_public_catalogues"), \
+                 patch.object(app, "check_github_update", return_value={"update_available": False}), \
+                 patch.object(app, "create_windows_tray_image", return_value=None), \
+                 patch.object(app, "get_application_launch_arguments", return_value=["marblescape.exe"]), \
+                 patch.object(app.subprocess, "Popen") as launch, \
+                 patch.object(app.DOWNLOAD_PROGRESS, "request_cancel") as cancel:
+                self.assertEqual(app.run_with_windows_tray([]), 0)
+            self.assertTrue(worker_finished.is_set())
+            self.assertTrue(cancel.called)
+            self.assertEqual(launch.call_count, 1)
+            self.assertEqual(launch.call_args.kwargs["env"]["MARBLESCAPE_RESTART_WAIT"], "1")
+        finally:
+            app.APPLICATION_STOP_EVENT.clear()
+
     def test_tray_exit_closes_an_open_tk_window(self):
         import tkinter as tk
         import pystray
