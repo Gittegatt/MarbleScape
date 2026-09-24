@@ -355,6 +355,7 @@ try {
         "marblescape_source_defaults.py",
         "marblescape_source_settings.py",
         "marblescape_cache.py",
+        "marblescape_image_metadata.py",
         "marblescape_profiles.py",
         "marblescape_profile_settings.py",
         "marblescape_time.py",

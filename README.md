@@ -43,7 +43,7 @@ inconsistent segments. See [Satellite imagery artifacts](docs/IMAGERY_ARTIFACTS.
 A reviewed prebuilt package supports 64-bit Windows 10 and 11.
 
 1. Download the versioned Windows archive (for example,
-   `MarbleScape-windows-x64_v1.3.0.zip`) and `SHA256SUMS.txt` from
+   `MarbleScape-windows-x64_v1.3.1.zip`) and `SHA256SUMS.txt` from
    [GitHub Releases](https://github.com/Gittegatt/MarbleScape/releases).
 2. Verify the archive checksum and extract the complete ZIP to a user-writable folder.
 3. Run `marblescape.exe`.
@@ -130,7 +130,8 @@ Settings contains these tabs:
 - **Storage & History** - Latest folder, History, retention, cache, and storage status.
 - **Backup** - JSON export and import.
 - **Sources** - Links to the original satellite imagery viewers.
-- **Info** - Workflow, imagery guidance, mosaic limitations, and map-overlay behavior.
+- **Info** - Workflow, imagery guidance, mosaic limitations, map-overlay behavior,
+  and embedded PNG metadata.
 - **About** - Version, project and documentation links, privacy and licensing summary,
   imagery notice, and update check.
 
@@ -141,6 +142,12 @@ visible while individual tabs scroll.
 The detailed control reference, storage behavior, custom folders, advanced
 TOML settings, render quality, presets, and backup format are in the
 [User guide](docs/USER_GUIDE.md).
+
+New PNG images contain a compact MarbleScape provenance record: source,
+selection, image time or mosaic period, and applicable location and saved-profile
+name. It contains no OAuth credentials, tokens, or local file paths. Profile
+names and coordinates can still be private; inspect images before sharing them.
+Older images are not modified. See [Privacy and network access](docs/PRIVACY_AND_NETWORK.md).
 
 ## Image profiles and rotation
 

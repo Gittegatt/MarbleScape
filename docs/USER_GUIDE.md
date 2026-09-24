@@ -335,6 +335,21 @@ on another computer. A saved Copernicus Client secret is protected for the
 Windows user that created it; enter that secret again after restoring on a
 different computer or Windows account.
 
+Backups contain the full configuration and saved profiles, including private
+locations and a user-protected Copernicus Client secret. Keep backup JSON files
+private; they are not part of the public release.
+
+## Image metadata
+
+Newly downloaded PNG images carry a small `MarbleScape` UTF-8 PNG text record.
+It includes the source, selected mission/product/layer where applicable, image
+dimensions, source time or mosaic period, location and zoom for Copernicus, and
+the saved profile name when a profile produced the image. A mosaic period is not
+presented as a single acquisition time. Existing images are not rewritten.
+The record excludes OAuth credentials, access tokens, local paths, and the full
+configuration. Profile names and coordinates may themselves be private, so
+review the original PNG before sharing it.
+
 ## Configuration
 
 In Settings > Storage & History, use `Custom latest folder` under Latest image

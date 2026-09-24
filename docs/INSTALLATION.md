@@ -11,7 +11,7 @@ require a separate Python installation. Publish a newly built package only
 after completing the distribution review documented below.
 
 1. Download a published, reviewed versioned archive such as
-   `MarbleScape-windows-x64_v1.3.0.zip` and
+   `MarbleScape-windows-x64_v1.3.1.zip` and
    `SHA256SUMS.txt` from
    [GitHub Releases](https://github.com/Gittegatt/MarbleScape/releases).
 2. Extract the complete ZIP archive into a user-writable folder. Do not run the
@@ -19,7 +19,7 @@ after completing the distribution review documented below.
 3. Optionally verify the download before starting it:
 
    ```powershell
-   Get-FileHash .\MarbleScape-windows-x64_v1.3.0.zip -Algorithm SHA256
+   Get-FileHash .\MarbleScape-windows-x64_v1.3.1.zip -Algorithm SHA256
    Get-Content .\SHA256SUMS.txt
    ```
 

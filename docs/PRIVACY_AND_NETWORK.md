@@ -11,6 +11,13 @@ API keys. It stores configuration and downloaded images locally. User-provided
 Copernicus OAuth credentials are used only for direct Copernicus Data Space API
 requests as described below.
 
+New PNG images include a `MarbleScape` text metadata record with source,
+selection, applicable coordinates and profile name, and image time or mosaic
+period. It never includes OAuth credentials, tokens, or local file paths. The
+metadata stays with a copy of the original PNG; review it before sharing images
+whose profile name or coordinates may be sensitive. Settings backup JSON files
+contain complete settings and profiles and should be kept private.
+
 The Windows tray checks `api.github.com` for the latest public MarbleScape
 release once after each start. The About tab can repeat the check manually.
 Only release metadata is requested; no account login or OAuth credentials are

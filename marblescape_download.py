@@ -47,6 +47,7 @@ from marblescape_copernicus import (
     normalize_auth_configuration,
     normalize_profile as normalize_copernicus_profile,
     protect_client_secret,
+    supports_cloud_filter as copernicus_supports_cloud_filter,
 )
 from marblescape_profiles import (
     RotationScheduler,
@@ -54,6 +55,7 @@ from marblescape_profiles import (
     serialize_library,
 )
 from marblescape_cache import get_profile_image_cache, signature_digest
+from marblescape_image_metadata import SCHEMA_VERSION as IMAGE_METADATA_VERSION, embed_png_metadata
 from marblescape_source_defaults import (
     AUTO_RESOLUTION_PROVIDERS,
     default_source_profiles,
@@ -303,7 +305,11 @@ BEST_PRACTICE_TEXT = (
     "Sentinel-1 and Sentinel-2 mosaic products too. A precomputed cloudless mosaic can "
     "still contain transparent No Data pixels, residual clouds, snow, bright terrain "
     "artifacts, or source-tile seams. Transparent pixels reveal the map background; "
-    "compare the same period in Copernicus Browser when checking an apparent gap."
+    "compare the same period in Copernicus Browser when checking an apparent gap.\n\n"
+    "New PNG images include MarbleScape source, selection, image time or mosaic "
+    "period, and location metadata when applicable. Check the embedded profile "
+    "name and coordinates before sharing an image. OAuth credentials, tokens, "
+    "and local file paths are not included."
 )
 
 # Each image provider keeps its own selection; old configurations use EUMETSAT.
@@ -4499,6 +4505,75 @@ def profile_cache_source_time(render_mode, requests, source_signature=None):
     return None
 
 
+def image_profile_name(profile_id):
+    """Resolve a saved profile name without putting the profile library in a PNG."""
+    if profile_id is None:
+        return None
+    for item in IMAGE_PROFILE_LIBRARY.get("items", ()):
+        if item["id"] == profile_id:
+            return item["name"]
+    return None
+
+
+def image_provenance(render_mode, requests, output_size, source_time=None,
+                     profile_name=None):
+    """Select only public, image-relevant values; never serialize full settings."""
+    width, height = map(int, output_size)
+    result = {
+        "schema_version": IMAGE_METADATA_VERSION,
+        "software": "MarbleScape",
+        "software_version": VERSION,
+        "source": SOURCE_LABELS[IMAGE_SOURCE],
+        "width": width,
+        "height": height,
+    }
+    if profile_name:
+        result["profile_name"] = profile_name
+    if render_mode == "copernicus":
+        frame = requests[0]["frame"]
+        profile, product, layer = frame["profile"], frame["product"], frame["layer"]
+        result.update(
+            mission=profile["mission"], product=product["name"],
+            layer=layer["name"], latitude=profile["latitude"],
+            longitude=profile["longitude"], map_zoom=profile["map_zoom"],
+            map_labels=profile["map_labels"],
+            selected_date=profile["date"], resolved_date=frame["date"],
+        )
+        if "date_granularity" in layer:
+            period_date = dt.date.fromisoformat(frame["date"])
+            granularity = layer["date_granularity"]
+            result["mosaic_period"] = (
+                f"{period_date.year}-Q{(period_date.month - 1) // 3 + 1}"
+                if granularity == "quarter" else
+                f"{period_date.year}-{period_date.month:02d}"
+                if granularity == "month" else str(period_date.year)
+            )
+            result["mosaic_brightness_percent"] = profile["brightness"]
+        else:
+            result["coverage_mode"] = profile["coverage_mode"]
+            if profile["coverage_mode"] == "fill_gaps":
+                result["lookback_days"] = profile["lookback_days"]
+            if copernicus_supports_cloud_filter(layer):
+                result["max_cloud_cover_percent"] = profile["max_cloud_cover"]
+            if source_time:
+                result["source_time_utc"] = source_time
+    else:
+        profile = SOURCE_PROFILES.get(IMAGE_SOURCE, {})
+        for name in ("satellite", "mission", "area", "sector", "product",
+                     "layer", "resolution", "theme"):
+            value = profile.get(name)
+            if type(value) in (str, int, float, bool) and value != "":
+                result[name] = value
+        if IMAGE_SOURCE == "eumetsat":
+            result["layers"] = [
+                layer["name"] for layer in LAYER_CONFIG
+                if layer.get("enabled", True) and layer.get("name")
+            ]
+        if source_time:
+            result["source_time_utc"] = source_time
+    return result
+
+
 def _perform_update(
     render_mode,
     requests,
@@ -4557,6 +4632,14 @@ def _perform_update(
         raise RuntimeError("Update cancelled because the application is stopping.")
     if CONFIGURATION_RELOAD_EVENT.is_set():
         raise RuntimeError("Update discarded because configuration changed.")
+    data = embed_png_metadata(
+        data,
+        image_provenance(
+            render_mode, requests, (output_width, output_height),
+            source_time=cache_source_time,
+            profile_name=image_profile_name(cache_profile_id),
+        ),
+    )
     DOWNLOAD_PROGRESS.seal_cancellation()
     if cache_profile_id is None:
         installed_path = save_latest_image(
@@ -5145,6 +5228,11 @@ def main(argv=None, configuration_loaded=False, status_callback=None):
             cache_configuration_signature = image_cache_configuration_key(
                 capture_loaded_configuration()
             )
+            if cache_profile_id is not None:
+                # A cached PNG must not be shared with a differently named
+                # profile while still claiming the previous profile's name.
+                cache_configuration_signature["image_metadata_version"] = IMAGE_METADATA_VERSION
+                cache_configuration_signature["image_profile_name"] = image_profile_name(cache_profile_id)
             frozen_path = None
             if not CHECK_FOR_SOURCE_UPDATES and not force_download:
                 frozen_output_size = get_output_dimensions()
@@ -8700,7 +8788,8 @@ def run_with_windows_tray(argv=None):
                   "built-in API keys are included. Configuration, images, history, and "
                   "caches are stored locally. Network requests go to selected imagery "
                   "services and the public GitHub update endpoint; Copernicus OAuth "
-                  "credentials are sent only to Copernicus Data Space."),
+                  "credentials are sent only to Copernicus Data Space. New PNGs "
+                  "contain source and location metadata, but no credentials."),
             wraplength=620, justify="left",
         ).grid(row=3, column=0, pady=(0, 10), sticky="w")
         ttk.Label(
