@@ -243,6 +243,9 @@ from app_version import VERSION
 
 USER_AGENT = f"MarbleScapeWallpaperDownloader/{VERSION}"
 PROJECT_URL = "https://github.com/Gittegatt/MarbleScape"
+DOCUMENTATION_URL = PROJECT_URL + "#documentation"
+PRIVACY_URL = PROJECT_URL + "/blob/main/docs/PRIVACY_AND_NETWORK.md"
+LEGAL_URL = PROJECT_URL + "/blob/main/docs/LEGAL_AND_ATTRIBUTION.md"
 GITHUB_LATEST_RELEASE_API = (
     "https://api.github.com/repos/Gittegatt/MarbleScape/releases/latest"
 )
@@ -295,7 +298,12 @@ BEST_PRACTICE_TEXT = (
     "Provider websites and MarbleScape can use slightly different labels or expose "
     "different subsets of the same catalogue. Use the actual satellite view and "
     "geographic result as the reference when matching settings. Satellite imagery can "
-    "contain seams, processing artifacts, and areas with missing or partial imagery."
+    "contain seams, processing artifacts, and areas with missing or partial imagery.\n\n"
+    "Copernicus map labels and boundaries are independent overlays and apply to the "
+    "Sentinel-1 and Sentinel-2 mosaic products too. A precomputed cloudless mosaic can "
+    "still contain transparent No Data pixels, residual clouds, snow, bright terrain "
+    "artifacts, or source-tile seams. Transparent pixels reveal the map background; "
+    "compare the same period in Copernicus Browser when checking an apparent gap."
 )
 
 # Each image provider keeps its own selection; old configurations use EUMETSAT.
@@ -8685,8 +8693,25 @@ def run_with_windows_tray(argv=None):
                   "other acquisition or processing artifacts."),
             wraplength=620, justify="left",
         ).grid(row=2, column=0, pady=(0, 10), sticky="w")
+        ttk.Label(
+            about_frame,
+            text=("Unofficial third-party utility; not affiliated with or endorsed by "
+                  "the imagery providers. No analytics, telemetry, advertising, or "
+                  "built-in API keys are included. Configuration, images, history, and "
+                  "caches are stored locally. Network requests go to selected imagery "
+                  "services and the public GitHub update endpoint; Copernicus OAuth "
+                  "credentials are sent only to Copernicus Data Space."),
+            wraplength=620, justify="left",
+        ).grid(row=3, column=0, pady=(0, 10), sticky="w")
+        ttk.Label(
+            about_frame,
+            text=("Licensed under PolyForm Noncommercial 1.0.0. Third-party software "
+                  "and imagery remain subject to their own terms. Copyright 2026 "
+                  "Gittegatt."),
+            wraplength=620, justify="left",
+        ).grid(row=4, column=0, pady=(0, 10), sticky="w")
         about_actions = ttk.Frame(about_frame)
-        about_actions.grid(row=3, column=0, sticky="w")
+        about_actions.grid(row=5, column=0, sticky="w")
         ttk.Button(
             about_actions,
             text="Open GitHub project",
@@ -8707,6 +8732,19 @@ def run_with_windows_tray(argv=None):
         )
         latest_release_button.grid(row=0, column=2)
         latest_release_button.state(["disabled"])
+
+        about_reference_actions = ttk.Frame(about_frame)
+        about_reference_actions.grid(row=6, column=0, pady=(6, 0), sticky="w")
+        for column, (label, url) in enumerate((
+            ("Documentation", DOCUMENTATION_URL),
+            ("Privacy & network", PRIVACY_URL),
+            ("License & attribution", LEGAL_URL),
+        )):
+            ttk.Button(
+                about_reference_actions,
+                text=label,
+                command=lambda value=url: webbrowser.open(value, new=2),
+            ).grid(row=0, column=column, padx=(0, 6))
 
         def check_for_updates():
             check_update_button.state(["disabled"])
@@ -8758,7 +8796,7 @@ def run_with_windows_tray(argv=None):
             textvariable=update_status_var,
             wraplength=620,
             justify="left",
-        ).grid(row=4, column=0, pady=(8, 0), sticky="w")
+        ).grid(row=7, column=0, pady=(8, 0), sticky="w")
 
         button_frame = ttk.Frame(container)
         button_frame.grid(row=1, column=0, sticky="ew")

@@ -91,6 +91,10 @@ size above the required output when bandwidth and provider limits allow it.
 **Automatic** remains the efficient starting point. Provider websites and
 MarbleScape may use different labels or expose different subsets of the same
 catalogue, so compare the actual geographic result when matching settings.
+Copernicus map labels and boundaries are independent overlays and also apply to
+the Sentinel-1 and Sentinel-2 mosaic products. A cloudless mosaic can still
+contain transparent No Data pixels, residual clouds, snow, bright-terrain
+artifacts, or source-tile seams; transparent pixels reveal the map background.
 
 ## Image sources
 
@@ -126,8 +130,9 @@ Settings contains these tabs:
 - **Storage & History** - Latest folder, History, retention, cache, and storage status.
 - **Backup** - JSON export and import.
 - **Sources** - Links to the original satellite imagery viewers.
-- **Info** - Workflow and imagery guidance.
-- **About** - Version, project link, imagery notice, and update check.
+- **Info** - Workflow, imagery guidance, mosaic limitations, and map-overlay behavior.
+- **About** - Version, project and documentation links, privacy and licensing summary,
+  imagery notice, and update check.
 
 Settings changes remain drafts until **Apply** or **OK**. The footer keeps
 activity, next-check time, download progress, and the main action buttons

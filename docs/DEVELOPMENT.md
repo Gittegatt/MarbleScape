@@ -28,6 +28,11 @@ clear them for publication; complete the distribution review described below
 before publishing a new binary. Local configuration, shortcuts, downloaded
 images, caches, and unused local assets are never copied.
 
+The source archive includes the application modules, build scripts, tests,
+documentation, icon assets required by the build, licences, and corresponding
+third-party source. It excludes the local virtual environment and every runtime
+configuration, credential, profile, cache, history image, and generated binary.
+
 The build regenerates `assets/icons/marblescape.ico` from the supplied PNGs
 using `build_icon.py`. The ICO contains the original 16, 32, 48, 64, 128 and
 256 px images; the tray can additionally use the 512 px PNG. Keep these

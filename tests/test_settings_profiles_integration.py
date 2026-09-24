@@ -359,6 +359,18 @@ class SettingsProfilesIntegrationTests(unittest.TestCase):
             )
             self.assertIn("one available size above the required output", info_text)
             self.assertIn("missing or partial imagery", info_text)
+            self.assertIn("map labels and boundaries are independent overlays", info_text)
+            self.assertIn("transparent No Data pixels", info_text)
+            self.assertIn("No analytics, telemetry, advertising", info_text)
+            self.assertIn("PolyForm Noncommercial 1.0.0", info_text)
+            about_buttons = {
+                str(widget.cget("text")) for widget in self.descendants(context.root)
+                if isinstance(widget, ttk.Button)
+            }
+            self.assertTrue({
+                "Open GitHub project", "Check for updates", "Open latest release",
+                "Documentation", "Privacy & network", "License & attribution",
+            }.issubset(about_buttons))
             section = next(
                 widget for widget in self.descendants(context.root)
                 if isinstance(widget, ttk.LabelFrame)

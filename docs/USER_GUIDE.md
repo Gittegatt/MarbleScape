@@ -34,6 +34,13 @@ geographic result as the reference when matching settings. Satellite imagery
 can contain seams, processing artifacts, and areas with missing or partial
 imagery.
 
+Copernicus map labels and boundaries are independent overlays and apply to the
+Sentinel-1 and Sentinel-2 mosaic products too. A precomputed cloudless mosaic
+can still contain transparent No Data pixels, residual clouds, snow, bright
+terrain artifacts, or source-tile seams. Transparent pixels reveal the map
+background; compare the same period in Copernicus Browser when checking an
+apparent gap.
+
 ## Windows tray menu
 
 During normal continuous operation, a MarbleScape icon appears in the Windows system tray area. Its menu provides access to:
@@ -83,8 +90,10 @@ Settings is organized into nine tabs:
 - **Backup:** JSON import and export.
 - **Sources:** Clickable links to the satellite imagery viewers used by MarbleScape,
   grouped by provider. Technical API and data endpoints are not listed there.
-- **Info:** Workflow and satellite imagery guidance.
-- **About:** Installed version, project link, imagery notice, and a manual GitHub update check.
+- **Info:** Workflow and satellite imagery guidance, including Copernicus
+  mosaic limitations and map-overlay behavior.
+- **About:** Installed version, project and documentation links, privacy and
+  licensing summary, imagery notice, and a manual GitHub update check.
 
 At tray startup, MarbleScape checks the newest public GitHub release without
 delaying image updates. When it is newer than the installed version, a small

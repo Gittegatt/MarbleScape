@@ -371,6 +371,18 @@ try {
     }
     Copy-Item -LiteralPath $applicationIcon -Destination $sourceAssetsDirectory
 
+    $testsSource = Join-Path $projectRoot "tests"
+    if (-not (Test-Path -LiteralPath $testsSource -PathType Container)) {
+        throw "Test directory not found: $testsSource"
+    }
+    Assert-NotReparsePoint -Path $testsSource
+    $testsDestination = Join-Path $sourcePackageDirectory "tests"
+    New-Item -ItemType Directory -Path $testsDestination | Out-Null
+    foreach ($testFile in @(Get-ChildItem -LiteralPath $testsSource -File -Filter "test_*.py")) {
+        Assert-NotReparsePoint -Path $testFile.FullName
+        Copy-Item -LiteralPath $testFile.FullName -Destination $testsDestination
+    }
+
     $projectLicence = Join-Path $projectRoot "LICENSE"
     $thirdPartyLicences = Join-Path $projectRoot "licenses"
     if (-not (Test-Path -LiteralPath $projectLicence -PathType Leaf)) {
