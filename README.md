@@ -206,8 +206,6 @@ and Windows startup registration details are in
 
 [Support MarbleScape on Ko-fi](https://ko-fi.com/gittegatt)
 
-[Support MarbleScape on Buy Me a Coffee](https://buymeacoffee.com/gittegatt)
-
 ## License and contact
 
 MarbleScape is source-available under the
