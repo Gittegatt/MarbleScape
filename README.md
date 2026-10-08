@@ -46,8 +46,6 @@ MarbleScape is what came out of it. It downloads current satellite images and se
 them as my desktop wallpaper. Every time I look at my screen, I see the Earth as it is
 today, and it becomes more than just a background image.
 
-### It's not always pretty, but it's new.
-
 ## What Copernicus imagery is (and is not)
 
 Copernicus Browser imagery comes from the European Copernicus satellites
@@ -73,6 +71,8 @@ In return Copernicus imagery is:
 The other side: a picture can be made of several parts. A place at the edge of a
 satellite pass, or **Gap fill** filling missing areas from earlier days, puts
 acquisitions side by side, and their seams, different light or clouds can show.
+
+### It's not always pretty, but it's new.
 
 ## Main features
 
