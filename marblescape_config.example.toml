@@ -1,0 +1,298 @@
+# MarbleScape wallpaper configuration
+# EUMETSAT layer order is bottom to top. Restart after manual changes.
+
+[source]
+provider = "eumetsat"          # eumetsat, goes_east, goes_west, solar, himawari, slider, copernicus, or worldview
+check_for_updates = true        # false downloads once, then reuses the matching local image.
+
+# Each source keeps its own selection when switching providers.
+# NOAA selections always use the latest published still image.
+# Auto chooses the smallest offered source that avoids upscaling the output.
+[sources.eumetsat]
+theme = "all"
+satellite = "MTG - 0 Degree"
+mission = "MTG"
+product_type = "RGB Composites"
+layer = "mtg_fd:rgb_geocolour"
+orbit_type = "GEO"             # Catalogue metadata retained with the selected layer.
+fill_gaps = false               # Available only for suitable LEO single-overpass layers.
+gap_fill_lookback_hours = 12    # 12 or 24; only transparent No Data pixels are filled.
+
+[sources.goes_east]
+area = "full_disk"
+product = "GEOCOLOR"
+resolution = "auto"           # auto, largest, or a size offered in Settings.
+
+[sources.goes_west]
+area = "full_disk"
+product = "GEOCOLOR"
+resolution = "auto"
+
+[sources.solar]
+area = "sun"
+product = "Fe171"
+resolution = "auto"
+
+[sources.himawari]
+area = "nict_full_disk"
+product = "true_color"
+resolution = "auto"
+
+# CIRA SLIDER satellite/sector and product tiles are always the newest still image.
+# Map borders and latitude/longitude lines are separate SLIDER overlays and are not downloaded.
+[sources.slider]
+area = "goes-19---full_disk"
+product = "geocolor"
+resolution = "auto"
+
+# NASA Worldview is accessed through the public GIBS WMTS catalogue and WMS image service.
+# area is the GIBS visualization layer; product is "latest" or a listed fixed date.
+[sources.worldview]
+area = "VIIRS_NOAA20_CorrectedReflectance_TrueColor"
+product = "latest"
+resolution = "auto"
+
+# Copernicus Browser configuration. Date "latest" resolves the newest
+# acquisition available at the selected latitude/longitude.
+[sources.copernicus]
+configuration = "DEFAULT-THEME"
+mission = "Sentinel-2 Mosaics"
+product = "MARBLESCAPE::S2-QUARTERLY"
+layer = "TRUE_COLOR_CLOUDLESS"
+highlight = ""
+date = "latest"
+# For quarterly mosaics choose either a fixed catalogue date or a rolling offset.
+# "relative_quarter" requires date="latest" and quarter_offset=0..40.
+# Sentinel-1 monthly mosaics: "relative_month", date="latest", month_offset=0..120.
+date_mode = "catalogue"
+quarter_offset = 0
+month_offset = 0
+latitude = 51.1657
+longitude = 10.4515
+map_zoom = 7
+# Map overlays as in Copernicus Browser, each with its own color (#RRGGBB).
+map_labels = false              # Labels: place names, road names and POIs
+map_label_color = "#FFFFFF"
+map_borders = false             # Country borders
+map_border_color = "#FFFFFF"
+gap_fill_mode = "single" # Or "fill_gaps": fill with earlier imagery within lookback_days.
+# Supported maximum lookback values: 3, 7, 14, 21, 30, 45, 60, 90, 120, 180, 270, 365, 550, 730, 920, or 1095 days.
+lookback_days = 14
+# Optical layers: maximum tile cloud cover, 0-100 in 5% steps. Unsupported layers ignore it.
+max_cloud_cover = 100
+# Brightness and contrast correction, only for layers with a tone rule (docs/IMAGE_SOURCES.md,
+# "Tone rules"); other layers render stock. Brightness: 25-200 in 5% steps; 100 is the default.
+brightness = 100
+contrast = 100 # 0-200 in 5% steps; 100 is neutral.
+auto_brightness = true
+auto_contrast = true
+# Saved Copernicus PNG size, separate from General > Monitor output.
+# Auto enlarges the default size/aspect ratio for connected display requirements.
+image_size = "auto" # Or 1920x1080, 2560x1440, 3840x2160, 7680x4320.
+# Areas without image data (dataMask). "blur" and "blur_edge" spread the nearby
+# image into them; far away "blur" fades to the whole image's average and
+# "blur_edge" (Edge Blur) to that of the gap's border, e.g. sea next to a coast.
+# Mosaics: #RRGGBB, "transparent" (PNG alpha), "blur" or "blur_edge".
+no_data_color = "blur"
+# Regular layers: "transparent" (map background shows), #RRGGBB, "blur" or "blur_edge".
+scene_no_data_color = "blur"
+
+# Create a free OAuth client under User Settings > OAuth clients at:
+# https://shapps.dataspace.copernicus.eu/dashboard/#/account/settings
+# The Process API used by MarbleScape does not require a Configuration Instance.
+# Settings writes client_secret_protected as a per-user Windows DPAPI value.
+[copernicus]
+client_id = ""
+client_secret_protected = ""
+
+# Endpoint, WMS version, archive time, and render mode apply to EUMETSAT.
+# Update interval, timeout, and continuous operation apply to all sources.
+[service]
+endpoint = "https://view.eumetsat.int/geoserver/wms"
+version = "1.3.0"
+time = ""                       # Empty selects the latest available imagery.
+update_interval_minutes = 15.0        # UI: value + minutes/hours/days/weeks/30-day months.
+timeout_seconds = 90
+run_continuously = true
+render_mode = "auto"            # auto, server, or local
+# Image > Find location searches place names here (OpenStreetMap Nominatim).
+location_search_endpoint = "https://nominatim.openstreetmap.org/search"
+
+[download]
+catalogue_refresh_time = "03:00:00" # Daily local system time (HH:MM:SS); missed runs catch up at startup.
+show_speed = true
+speed_unit = "automatic"        # automatic, KB/s, MB/s, or Mbit/s
+show_progress = true             # Percentage (or finished parts of tiled images).
+show_size = true                 # Transferred/total size, or the size so far when no total is known.
+show_progress_bar = true         # Indeterminate when the server gives no total size.
+keep_completed_visible = false   # Keep the successful result visible until the next download.
+retries = 2                      # 1-9 retries after the first attempt (2-10 total attempts).
+catalogue_retries = 2            # 1-9 retries after the first catalogue attempt; cached data is used if needed.
+
+[output]
+latest_folder = ""             # Empty = root/content/latest; relative to the script folder.
+width = 2560
+height = 0                      # 0 derives height from aspect_ratio.
+aspect_ratio = "16:9"
+render_scale = "default"        # EUMETSAT WMS only: default (= display_render_scale), auto, or 1.0, 1.25, 1.5, 2.0.
+display_render_scale = "auto"   # General: sizes the picture for every display; auto, or 1.0, 1.25, 1.5, 2.0.
+background_color = "#000000"
+windows_root = "."              # Relative to the application folder; absolute is allowed.
+linux_root = "."
+
+[view]
+# Fit mode and zoom apply to EUMETSAT, NOAA, Himawari, CIRA SLIDER, and NASA Worldview. Copernicus uses its
+# own latitude, longitude, and map_zoom. Projections, presets, and the
+# TrueColor night option apply only to EUMETSAT.
+# Available projections: Geographic, GEOS: MSG FES, MTG FD, GEOS: MSG RSS,
+# GEOS: MSG IODC, Spherical Mercator, North Polar, South Polar.
+# All seven official EUMETSAT viewer projections are shown in Settings.
+# Regional presets still use Geographic. Other projections apply to full_earth
+# or custom. Use fit_mode="crop" for Geographic full_earth at screen ratios.
+projection = "GEOS: MSG RSS"
+preset = "full_earth"           # full_earth, europe, mediterranean,
+                                # central_europe, or custom
+fit_mode = "fit"                # fit or crop
+zoom = 1.0                      # Settings offers steps; 1 shows the preset as it is.
+truecolor_black_night = true   # Applies only to MTG TrueColor.
+# For preset="custom", use logical x/y order in the selected projection:
+# bbox = [-6500000.0, -6500000.0, 6500000.0, 6500000.0]
+# With projection="Geographic": bbox = [west, south, east, north] in degrees.
+# Settings > Image offers this as "Custom area": a centre plus Zoom, saved here
+# as the resulting bbox with zoom = 1.
+
+[history]
+folder = ""                    # Shared by no-profile and profile History. Empty = root/content/history; relative to the script folder.
+enabled = false
+retention_mode = "count"        # count, time, or both
+max_files = 100
+years = 0
+months = 0
+days = 1
+hours = 0
+minutes = 0
+profile_policies = "{}"        # Local per-profile History settings; never exported with profiles.
+
+[cache]
+# Profile image cache: one picture per profile and image settings, so returning
+# to recently used settings needs no download. The least recently used pictures
+# go first; each profile's current picture always stays. Pictures without a
+# profile (Latest snapshot) keep any number of variants within their own limit,
+# so they never push out saved profiles' pictures.
+max_size_gb = 2.0              # Saved profiles: 0.5 to 10 in steps of 0.5 (decimal GB).
+variants_per_profile = 5        # 1 to 10; 1 keeps only the current picture.
+latest_snapshot_size_gb = 0.5   # Latest snapshot: 0.5 to 10 in steps of 0.5 (decimal GB).
+
+[windows]
+set_wallpaper = true
+position = "fit"                # center, tile, stretch, fit, fill, span, or none
+monitor_positions = "{}"       # Per-monitor overrides are saved by the settings dialog.
+monitor_output_settings = "{}" # Per-monitor size, quality and color overrides.
+pause_on_error = true
+
+[display]
+time_zone = "system"            # system (recommended) or utc; display only
+appearance = "system"           # Settings windows: system (follow Windows), light or dark
+settings_window_width = 0       # Last Settings window size at 100 % scaling; 0 = default
+settings_window_height = 0      # (minimum width 900, height 700). Saved when it changes.
+settings_tab = ""               # Settings tab used last; "" = General. Saved when it changes.
+
+[updates]
+skipped_version = ""            # Latest release dismissed from the startup notice.
+
+[profile_list]
+columns_version = 10
+visible_columns = ["rotation_enabled", "name", "active", "source", "mission", "product", "layer", "time", "quarter_mode", "quarter_offset", "quarter_target", "location", "latitude", "longitude", "gap_fill", "cloud_coverage", "mosaic_brightness", "zoom", "maximum_lookback", "output_resolution", "map_labels", "cache_status", "last_download", "id", "no_data_color", "image_size", "mosaic_contrast", "auto_brightness", "auto_contrast", "data_coverage"]
+# Drag headings to reorder; Apply/OK saves the full order, including hidden columns.
+column_order = [] # Empty means default order; future columns are appended automatically.
+
+# Empty sort_column uses the saved rotation order. Table sorting does not change rotation.
+sort_column = ""
+sort_descending = false
+# Per-column pixel widths, including hidden columns. Missing entries use defaults.
+# Apply/OK stores all current widths here, e.g. { name = 240, cache_status = 420 }.
+column_widths = {}
+# Visible table rows (5 to 40). Drag the grip below the table; double-click it for 7.
+table_rows = 7
+# UUID of the manually applied profile; only used while image settings still match.
+applied_profile_id = ""
+
+# Protected state of the last successful image downloaded without a named profile.
+# Populated automatically; included in both settings-backup scopes, never rotation.
+[latest_snapshot]
+record_json = ""
+
+# These WMS layers apply only to EUMETSAT and are retained for later use.
+# Friendly basemap choices. Normally enable exactly one.
+[[layers]]
+kind = "basemap"
+name = "Natural Earth"
+enabled = true
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "basemap"
+name = "OSM Dark"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "basemap"
+name = "OSM Light"
+enabled = false
+opacity = 1.0
+style = ""
+
+# Exact WMS product names come from --list-layers or --export-layers.
+[[layers]]
+kind = "wms"
+name = "mtg_fd:rgb_geocolour"
+enabled = true
+opacity = 1.0
+style = ""
+# time = "latest"               # Or an ISO-8601 archive timestamp.
+
+# Friendly overlay choices.
+[[layers]]
+kind = "overlay"
+name = "Coastlines"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Boundaries"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Labels (dark)"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Labels (light)"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Graticules (dark)"
+enabled = false
+opacity = 1.0
+style = ""
+
+[[layers]]
+kind = "overlay"
+name = "Graticules (light)"
+enabled = false
+opacity = 1.0
+style = ""

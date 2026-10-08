@@ -1,0 +1,77 @@
+# Local configuration, including the protected latest snapshot and private locations
+/marblescape_config.toml
+/profiles.toml
+
+# Runtime output
+/content/
+# Generated images: legacy names and current UTC/hash names.
+marblescape_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_*.png
+MarbleScape_[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*Z_*.png
+MarbleScape_created-unknown_*.png
+/marblescape_layers.json
+marblescape-settings-*.json
+*marblescape-backup*.json
+/backups/
+/export/
+*.log
+*.tmp
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+*.egg-info/
+.venv/
+venv/
+
+# Local Windows artifacts
+*.lnk
+/marblescape.exe
+
+# Build and release output
+/build/
+/dist/
+/release/
+*.spec
+
+# Local environment files
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Local reports and ad-hoc exports
+/reports/
+/screenshots/
+MarbleScape_Profile_*.json
+*.marblescape-metadata.json
+# ExifTool's original-image copies are local backups, not repository assets.
+*.png_original
+*.sqlite
+*.sqlite3
+*.db
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.bak
+*.old

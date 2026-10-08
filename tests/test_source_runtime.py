@@ -1,0 +1,1537 @@
+"""Source configuration and runtime regression tests without live network access."""
+
+from contextlib import ExitStack, redirect_stdout
+from copy import deepcopy
+import datetime as dt
+import io
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+import tomllib
+from types import SimpleNamespace
+import unittest
+from unittest.mock import Mock, patch
+from urllib.parse import parse_qs, urlparse
+
+from PIL import Image
+
+import marblescape_download as app
+
+
+class SourceRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.saved_configuration = app.capture_loaded_configuration()
+        self.saved_clients = dict(app.NOAA_CLIENTS)
+        self.saved_himawari_clients = dict(app.HIMAWARI_CLIENTS)
+        self.saved_slider_clients = dict(app.SLIDER_CLIENTS)
+        self.saved_worldview_clients = dict(app.WORLDVIEW_CLIENTS)
+        self.saved_catalogue_clients = dict(app.CATALOGUE_CLIENTS)
+        self.saved_image_status = dict(app.IMAGE_STATUS)
+        self.events = (
+            app.APPLICATION_STOP_EVENT,
+            app.CONFIGURATION_RELOAD_EVENT,
+            app.FORCE_UPDATE_EVENT,
+        )
+        self.saved_events = [event.is_set() for event in self.events]
+        for event in self.events:
+            event.clear()
+        self.temporary = tempfile.TemporaryDirectory(prefix="marblescape-runtime-")
+        self.root = Path(self.temporary.name)
+        self.stack = ExitStack()
+        self.stack.enter_context(patch.object(
+            app, "PROFILE_LIBRARY_PATH", self.root / "profiles.toml"
+        ))
+        self.log = self.stack.enter_context(patch.object(app, "log"))
+        self.stack.enter_context(patch.dict(app.PROFILE_FAILURES, clear=True))
+        self.stack.enter_context(patch.dict(app.IMAGE_OUTCOME, {"serial": 0, "kind": None,
+                                                                "profile": None, "time": None}))
+        # Picture sizes never depend on the displays of the computer running the tests.
+        self.stack.enter_context(patch.object(app, "list_windows_wallpaper_monitors", return_value=[]))
+        self.wallpaper = self.stack.enter_context(patch.object(app, "set_windows_wallpaper"))
+        self.wms = self.stack.enter_context(patch.object(
+            app, "download_capabilities", side_effect=AssertionError("Unexpected WMS request")
+        ))
+        self.stack.enter_context(patch.object(
+            app, "urlopen", side_effect=AssertionError("Unexpected live network request")
+        ))
+        app.load_configuration(app.DEFAULT_CONFIG_TEMPLATE_PATH)
+        app.OUTPUT_ROOT_WINDOWS = self.root
+        app.OUTPUT_ROOT_LINUX = self.root
+        app.CUSTOM_LATEST_FOLDER = ""
+        app.CUSTOM_HISTORY_FOLDER = ""
+        app.ACTIVE_CONFIG_PATH = self.root / "settings.toml"
+        app.ACTIVE_PROFILE_LIBRARY_PATH = self.root / "profiles.toml"
+        app.ENABLE_HISTORY = False
+        app.SET_WINDOWS_WALLPAPER = False
+        app.WINDOWS_PAUSE_ON_EXIT = False
+        app.WIDTH, app.HEIGHT, app.ASPECT_RATIO = 32, 18, "16:9"
+        app.IMAGE_SOURCE = "goes_east"
+        app.NOAA_CLIENTS.clear()
+        app.HIMAWARI_CLIENTS.clear()
+        app.SLIDER_CLIENTS.clear()
+        app.WORLDVIEW_CLIENTS.clear()
+        app.CATALOGUE_CLIENTS.clear()
+        app.IMAGE_STATUS.update(provider=None, timestamp=None, error="", interval_minutes=10)
+        app.refresh_output_paths()
+        app.set_current_image_path(None)
+        self.frame = {
+            "url": "https://cdn.star.nesdis.noaa.gov/GOES19/ABI/FD/GEOCOLOR/20262541200_GOES19-ABI-FD-GEOCOLOR-1808x1808.jpg",
+            "timestamp": "2026-09-11T12:00:00Z",
+            "interval_minutes": 10,
+        }
+        self.client = SimpleNamespace(
+            latest=Mock(return_value=dict(self.frame)),
+            fetch_image=Mock(side_effect=self.make_png),
+            list_products=Mock(return_value=[{
+                "id": "GEOCOLOR", "label": "GeoColor", "resolutions": ["1808x1808"]
+            }]),
+        )
+        self.client_factory = self.stack.enter_context(patch.object(
+            app, "NOAAClient", return_value=self.client
+        ))
+
+    def tearDown(self):
+        try:
+            app.restore_loaded_configuration(self.saved_configuration)
+            app.NOAA_CLIENTS.clear()
+            app.NOAA_CLIENTS.update(self.saved_clients)
+            app.HIMAWARI_CLIENTS.clear()
+            app.HIMAWARI_CLIENTS.update(self.saved_himawari_clients)
+            app.SLIDER_CLIENTS.clear()
+            app.SLIDER_CLIENTS.update(self.saved_slider_clients)
+            app.WORLDVIEW_CLIENTS.clear()
+            app.WORLDVIEW_CLIENTS.update(self.saved_worldview_clients)
+            app.CATALOGUE_CLIENTS.clear()
+            app.CATALOGUE_CLIENTS.update(self.saved_catalogue_clients)
+            app.IMAGE_STATUS.clear()
+            app.IMAGE_STATUS.update(self.saved_image_status)
+            for event, was_set in zip(self.events, self.saved_events):
+                event.set() if was_set else event.clear()
+        finally:
+            self.stack.close()
+            self.temporary.cleanup()
+
+    @staticmethod
+    def make_png(frame, dimensions, **options):
+        del frame, options
+        output = io.BytesIO()
+        with Image.new("RGB", dimensions, (24, 100, 160)) as image:
+            image.save(output, format="PNG")
+        return output.getvalue()
+
+    def assert_installed_png(self):
+        files = app.get_latest_image_files()
+        self.assertEqual(len(files), 1)
+        with Image.open(files[0]) as image:
+            self.assertEqual(image.format, "PNG")
+            self.assertEqual(image.size, (32, 18))
+            image.load()
+        return files[0]
+
+    def test_default_content_paths_are_created(self):
+        app.ENABLE_HISTORY = True
+
+        app.ensure_directories()
+
+        self.assertEqual(app.CONTENT_DIR, self.root / "content")
+        self.assertEqual(app.LATEST_DIR, self.root / "content" / "latest")
+        self.assertEqual(app.HISTORY_DIR, self.root / "content" / "history")
+        self.assertTrue(app.LATEST_DIR.is_dir())
+        self.assertTrue(app.HISTORY_DIR.is_dir())
+
+    def test_latest_and_history_cannot_be_stored_inside_managed_cache_paths(self):
+        safe = self.root / "safe"
+        unsafe_folders = (
+            self.root / "content" / "cache",
+            self.root / "content" / "cache" / "nested",
+            self.root / "content" / "cache.sqlite3",
+            self.root / "content" / "cache.sqlite3" / "nested",
+        )
+        for folder in unsafe_folders:
+            with self.subTest(folder=folder):
+                with self.assertRaises(ValueError):
+                    app.validate_image_folders(folder, safe)
+
+    def test_clear_profile_cache_preserves_latest_and_requests_active_refresh(self):
+        app.ensure_directories()
+        latest = app.LATEST_DIR / "marblescape_base.png"
+        latest.write_bytes(self.make_png({}, (32, 18)))
+        profile_id = "a" * 32
+        cached, _previous = app.get_profile_cache().install(
+            profile_id, {"configuration": 1}, {"source": 1},
+            self.make_png({}, (32, 18)), (32, 18),
+        )
+        app.set_current_image_path(cached, profile_id)
+
+        cleared = app.clear_profile_image_cache()
+
+        self.assertEqual(cleared["files"], 1)
+        self.assertTrue(latest.exists())
+        self.assertIsNone(app.get_current_image_path())
+        self.assertTrue(app.FORCE_UPDATE_EVENT.is_set())
+        app.FORCE_UPDATE_EVENT.clear()
+
+    def test_profile_cache_archives_only_replaced_content(self):
+        app.ENABLE_HISTORY = True
+        app.ensure_directories()
+        profile_id = "b" * 32
+        first = self.make_png({}, (32, 18))
+        buffer = io.BytesIO()
+        with Image.new("RGB", (32, 18), (180, 30, 40)) as image:
+            image.save(buffer, format="PNG")
+        second = buffer.getvalue()
+
+        app.save_profile_image(profile_id, {"configuration": 1}, {"source": 1}, first, (32, 18))
+        app.save_profile_image(profile_id, {"configuration": 1}, {"source": 1}, first, (32, 18))
+        self.assertEqual(app.get_history_files(), [])
+        app.save_profile_image(profile_id, {"configuration": 1}, {"source": 2}, second, (32, 18))
+
+        history = app.get_history_files()
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].read_bytes(), first)
+        self.assertEqual(app.get_profile_cache().status()["files"], 1)
+
+    def test_clear_history_removes_only_managed_history_images(self):
+        app.ENABLE_HISTORY = True
+        app.ensure_directories()
+        first = self.make_png({}, (32, 18))
+        second = self.make_png({}, (16, 9))
+        managed = (
+            app.HISTORY_DIR / "marblescape_2026-09-13_120000.png",
+        )
+        managed[0].write_bytes(first)
+        other_product = app.HISTORY_DIR / "other_2026-09-13_110000.png"
+        other_product.write_bytes(second)
+        unrelated_png = app.HISTORY_DIR / "keep.png"
+        unrelated_text = app.HISTORY_DIR / "keep.txt"
+        unrelated_png.write_bytes(first)
+        unrelated_text.write_text("keep", encoding="utf-8")
+        latest = app.LATEST_DIR / "marblescape_current.png"
+        latest.write_bytes(first)
+        cached, _previous = app.get_profile_cache().install(
+            "c" * 32, {"configuration": 1}, {"source": 1}, first, (32, 18)
+        )
+
+        cleared = app.clear_history_images()
+
+        self.assertEqual(cleared, {"files": 1, "bytes": len(first)})
+        self.assertTrue(all(not path.exists() for path in managed))
+        self.assertTrue(other_product.exists())
+        self.assertTrue(unrelated_png.exists())
+        self.assertTrue(unrelated_text.exists())
+        self.assertTrue(latest.exists())
+        self.assertTrue(cached.exists())
+
+    def test_profile_history_retention_and_estimate_work_when_no_profile_history_is_off(self):
+        profile_id = "a" * 32
+        app.IMAGE_PROFILE_LIBRARY = app.normalize_library({"items": [
+            {"id": profile_id, "name": "Earth", "settings": {}}
+        ]})
+        app.PROFILE_HISTORY_POLICIES = {profile_id: {
+            "enabled": True, "retention_mode": "count", "max_files": 1,
+        }}
+        app.ENABLE_HISTORY = False
+        profile_folder = app.profile_history_directory(profile_id, "Earth", create=True)
+        self.assertEqual(profile_folder.name, f"Earth_{profile_id}")
+        first = profile_folder / "MarbleScape_2026-09-26T120000Z_old.png"
+        second = profile_folder / "MarbleScape_2026-09-27T120000Z_new.png"
+        first.write_bytes(self.make_png({}, (32, 18)))
+        second.write_bytes(self.make_png({}, (32, 18)))
+        os.utime(first, (1, 1))
+        no_profile = app.profile_history_directory(None, create=True) / "MarbleScape_2026-09-26T120000Z_no-profile.png"
+        no_profile.write_bytes(self.make_png({}, (32, 18)))
+
+        self.assertEqual(app.estimated_total_history_slots(), 1)
+        self.assertEqual(app.get_history_files("profiles"), [first, second])
+        self.assertEqual(app.cleanup_history(), 1)
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+        self.assertTrue(no_profile.exists())
+        self.assertEqual(app.clear_history_images("profiles")["files"], 1)
+        self.assertTrue(no_profile.exists())
+
+    def test_deleted_profile_history_removes_that_profiles_whole_folder(self):
+        gone_id, foreign_id, kept_id = "a" * 32, "b" * 32, "c" * 32
+        png = self.make_png({}, (32, 18))
+        gone = app.profile_history_directory(gone_id, "Gone", create=True)
+        # A folder left under an older name still belongs to the same profile.
+        stale = app.profile_history_directory(gone_id, "Old name", create=True)
+        foreign = app.profile_history_directory(foreign_id, "Foreign", create=True)
+        kept = app.profile_history_directory(kept_id, "Kept", create=True)
+        no_profile = app.profile_history_directory(None, create=True)
+        for folder in (gone, stale, foreign, kept, no_profile):
+            (folder / "MarbleScape_2026-09-26T120000Z_archive.png").write_bytes(png)
+        (gone / "MarbleScape_2026-09-27T120000Z_archive.png").write_bytes(png)
+        (foreign / "notes.txt").write_text("user", encoding="utf-8")
+        nested = foreign / "edited"
+        nested.mkdir()
+        read_only = nested / "own.png"
+        read_only.write_bytes(png)
+        os.chmod(read_only, stat.S_IREAD)
+
+        managed_only = {"files": 3, "bytes": 3 * len(png), "other_files": 0, "other_bytes": 0}
+        self.assertEqual(app.profile_history_usage(gone_id), managed_only)
+        self.assertEqual(app.delete_profile_history(gone_id), managed_only)
+        self.assertFalse(gone.exists())
+        self.assertFalse(stale.exists())
+        # Files MarbleScape did not create are counted separately and go with the folder.
+        with_other = {"files": 1, "bytes": len(png), "other_files": 2, "other_bytes": 4 + len(png)}
+        self.assertEqual(app.profile_history_usage(foreign_id), with_other)
+        self.assertEqual(app.delete_profile_history(foreign_id), with_other)
+        self.assertFalse(foreign.exists())
+        self.assertEqual(len(list(kept.glob("*.png"))), 1)
+        self.assertEqual(len(list(no_profile.glob("*.png"))), 1)
+        # No-profile History is never addressed as a deleted profile.
+        import marblescape_snapshot as snapshot
+        empty = {"files": 0, "bytes": 0, "other_files": 0, "other_bytes": 0}
+        for identifier in (None, "", snapshot.SYSTEM_ID, "*"):
+            self.assertEqual(app.profile_history_usage(identifier), empty)
+            self.assertEqual(app.delete_profile_history(identifier), empty)
+        self.assertEqual(len(list(no_profile.glob("*.png"))), 1)
+        self.assertTrue(kept.is_dir())
+
+    def test_protected_snapshot_history_uses_only_no_profile_folder(self):
+        import marblescape_snapshot as snapshot
+
+        app.ENABLE_HISTORY = True
+        app.ensure_directories()
+        self.assertEqual(
+            app.profile_history_directory(snapshot.SYSTEM_ID, snapshot.SYSTEM_NAME).name,
+            app.NO_PROFILE_HISTORY_FOLDER,
+        )
+
+        first_data = io.BytesIO()
+        second_data = io.BytesIO()
+        Image.new("RGB", (32, 18), (10, 20, 30)).save(first_data, format="PNG")
+        Image.new("RGB", (32, 18), (30, 20, 10)).save(second_data, format="PNG")
+        first = app.save_latest_image(first_data.getvalue())
+        self.assertIsNotNone(first)
+        second = app.save_latest_image(second_data.getvalue())
+        self.assertIsNotNone(second)
+        archived = list((app.HISTORY_DIR / app.NO_PROFILE_HISTORY_FOLDER).glob("*.png"))
+        self.assertEqual(len(archived), 1)
+        self.assertFalse(any(
+            folder.is_dir() and folder.name.startswith(snapshot.SYSTEM_NAME + "_")
+            for folder in app.HISTORY_DIR.iterdir()
+        ))
+
+    def test_manually_applied_profile_image_is_archived_under_its_profile_policy(self):
+        from PIL import PngImagePlugin
+
+        profile_id, deleted_id = "a" * 32, "b" * 32
+        app.IMAGE_PROFILE_LIBRARY = app.normalize_library({"items": [
+            {"id": profile_id, "name": "Earth", "settings": {}}
+        ]})
+
+        def latest_png(identifier, color):
+            info = PngImagePlugin.PngInfo()
+            info.add_itxt("MarbleScape", json.dumps({"profile_id": identifier, "profile_name": "Earth"}))
+            output = io.BytesIO()
+            Image.new("RGB", (32, 18), color).save(output, format="PNG", pnginfo=info)
+            return output.getvalue()
+
+        app.ensure_directories()
+        no_profile = app.HISTORY_DIR / app.NO_PROFILE_HISTORY_FOLDER
+        profile_folder = app.profile_history_directory(profile_id, "Earth")
+
+        # The profile policy applies even when no-profile History is disabled.
+        app.ENABLE_HISTORY = False
+        app.PROFILE_HISTORY_POLICIES = {profile_id: {"enabled": True}}
+        app.save_latest_image(latest_png(profile_id, (1, 2, 3)))
+        app.save_latest_image(latest_png(profile_id, (4, 5, 6)))
+        self.assertEqual(len(list(profile_folder.glob("*.png"))), 1)
+        self.assertEqual(list(no_profile.glob("*.png")), [])
+
+        # A disabled profile policy wins over enabled no-profile History.
+        app.ENABLE_HISTORY = True
+        app.PROFILE_HISTORY_POLICIES = {profile_id: {"enabled": False}}
+        app.save_latest_image(latest_png(deleted_id, (7, 8, 9)))
+        self.assertEqual(len(list(profile_folder.glob("*.png"))), 1)
+        self.assertEqual(list(no_profile.glob("*.png")), [])
+
+        # Images of profiles that no longer exist fall back to no-profile History.
+        app.save_latest_image(latest_png(profile_id, (10, 11, 12)))
+        self.assertEqual(len(list(no_profile.glob("*.png"))), 1)
+        self.assertFalse(app.profile_history_directory(deleted_id, "Earth").exists())
+
+    def test_migration_merges_obsolete_snapshot_profile_folder(self):
+        import marblescape_snapshot as snapshot
+
+        app.HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        obsolete = app.HISTORY_DIR / f"{snapshot.SYSTEM_NAME}_{'a' * 32}"
+        obsolete.mkdir()
+        image = obsolete / "MarbleScape_2026-09-27T120000Z_snapshot.png"
+        image.write_bytes(self.make_png({}, (32, 18)))
+
+        self.assertEqual(app.migrate_history_folders(), 1)
+        self.assertFalse(obsolete.exists())
+        self.assertTrue((app.HISTORY_DIR / app.NO_PROFILE_HISTORY_FOLDER / image.name).is_file())
+
+    def test_new_configurations_check_for_images_every_15_minutes(self):
+        template = tomllib.loads(app.DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(template["service"]["update_interval_minutes"], 15.0)
+        # An interval the user saved is never replaced by the new default.
+        config = self.root / "saved-interval.toml"
+        config.write_text("[service]\nupdate_interval_minutes = 5.0\n", encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.UPDATE_INTERVAL_MINUTES, 5.0)
+
+    def test_update_interval_friendly_units_convert_to_minutes(self):
+        self.assertEqual(app.update_interval_minutes("2", "months"), 86400)
+        self.assertEqual(app.update_interval_minutes("3", "weeks"), 30240)
+        self.assertEqual(app.update_interval_minutes("1", "days"), 1440)
+        self.assertEqual(app.update_interval_minutes("4", "hours"), 240)
+        self.assertEqual(app.update_interval_minutes("15", "minutes"), 15)
+        self.assertEqual(app.update_interval_selection(10080), ("1", "weeks"))
+        self.assertEqual(app.update_interval_selection(90), ("90", "minutes"))
+        with self.assertRaises(ValueError):
+            app.update_interval_minutes("1", "fortnights")
+
+    def test_saved_profile_name_synchronizes_existing_history_folder(self):
+        profile_id = "a" * 32
+        app.IMAGE_PROFILE_LIBRARY = app.normalize_library({"items": [
+            {"id": profile_id, "name": "New name", "settings": {}}
+        ]})
+        original = app.profile_history_directory(profile_id, "Old name", create=True)
+        kept = original / "MarbleScape_2026-09-26T120000Z_archive.png"
+        kept.write_bytes(self.make_png({}, (32, 18)))
+        app.ensure_directories()
+        renamed = app.profile_history_directory(profile_id, "New name")
+        self.assertTrue((renamed / kept.name).is_file())
+        self.assertFalse(original.exists())
+
+    def test_saved_profile_names_lose_invisible_characters_and_history_follows(self):
+        profile_id = "a" * 32
+        path = self.root / "profiles.toml"
+        path.write_text(app.serialize_library({"version": 1, "items": [
+            {"id": profile_id, "name": "Earth", "settings": {}}],
+            "rotation": {"enabled": False, "interval": 15, "unit": "minutes", "order": [],
+                         "random_shuffle": False, "keep_last_position": False}}).replace(
+            "Earth", "Earth​"), encoding="utf-8")
+        self.assertIn("Earth​", path.read_text(encoding="utf-8"))
+        old_folder = app.HISTORY_DIR / f"Earth​_{profile_id}"
+        old_folder.mkdir(parents=True)
+        kept = old_folder / "MarbleScape_2026-09-26T120000Z_archive.png"
+        kept.write_bytes(self.make_png({}, (32, 18)))
+        with patch.object(app, "log") as log:
+            app.IMAGE_PROFILE_LIBRARY = app.read_profile_library_file(path)
+        self.assertEqual(app.IMAGE_PROFILE_LIBRARY["items"][0]["name"], "Earth")
+        log.assert_called_once_with("Removed invisible or unusual characters from 1 saved profile name(s).")
+        app.ensure_directories()
+        self.assertTrue((app.profile_history_directory(profile_id, "Earth") / kept.name).is_file())
+        self.assertFalse(old_folder.exists())
+
+    def test_profile_history_uses_shared_history_folder_and_drops_legacy_profile_root(self):
+        profile_id = "a" * 32
+        shared = self.root / "shared-history"
+        legacy_root = self.root / "legacy-profile-root"
+        policies = json.dumps({profile_id: {"enabled": True, "folder": legacy_root.as_posix()}})
+        config = self.root / "legacy.toml"
+        config.write_text(
+            f"[history]\nfolder = '{shared.as_posix()}'\nprofile_policies = '{policies}'\n",
+            encoding="utf-8",
+        )
+        app.load_configuration(config)
+        app.IMAGE_PROFILE_LIBRARY = app.normalize_library({"items": [
+            {"id": profile_id, "name": "Earth", "settings": {}}
+        ]})
+
+        self.assertEqual(app.HISTORY_DIR, shared)
+        self.assertNotIn("folder", app.PROFILE_HISTORY_POLICIES[profile_id])
+        self.assertTrue(app.profile_history_policy(profile_id)["enabled"])
+        folder = app.profile_history_directory(profile_id, "Earth", create=True)
+        self.assertEqual(folder, shared / f"Earth_{profile_id}")
+        self.assertEqual(app.profile_history_directory(None).parent, shared)
+        archived = folder / "MarbleScape_2026-09-26T120000Z_archive.png"
+        archived.write_bytes(self.make_png({}, (32, 18)))
+        self.assertEqual(app.get_history_files(profile_id), [archived])
+        self.assertEqual(app.get_history_files("profiles"), [archived])
+        self.assertFalse(legacy_root.exists())
+
+    def test_minimal_config_uses_current_defaults(self):
+        config = self.root / "minimal.toml"
+        config.write_text('[service]\nupdate_interval_minutes = 7.0\n', encoding="utf-8")
+        app.SOURCE_PROFILES["goes_east"]["area"] = "changed_area"
+        app.SHOW_DOWNLOAD_SPEED = False
+        app.DOWNLOAD_SPEED_UNIT = "Mbit/s"
+        app.SHOW_DOWNLOAD_PROGRESS = False
+        app.SHOW_DOWNLOAD_PROGRESS_BAR = False
+        app.KEEP_COMPLETED_DOWNLOAD_VISIBLE = True
+        app.load_configuration(config)
+        self.assertEqual(app.IMAGE_SOURCE, "eumetsat")
+        self.assertEqual(app.SOURCE_PROFILES["goes_east"]["area"], "full_disk")
+        self.assertEqual(app.SOURCE_PROFILES["solar"]["product"], "Fe171")
+        self.assertTrue(app.SHOW_DOWNLOAD_SPEED)
+        self.assertEqual(app.DOWNLOAD_SPEED_UNIT, "automatic")
+        self.assertTrue(app.SHOW_DOWNLOAD_PROGRESS)
+        self.assertTrue(app.SHOW_DOWNLOAD_PROGRESS_BAR)
+        self.assertFalse(app.KEEP_COMPLETED_DOWNLOAD_VISIBLE)
+        self.assertEqual(app.UPDATE_INTERVAL_MINUTES, 7.0)
+        self.assertEqual(app.DISPLAY_TIME_ZONE, "system")
+        # Without a saved choice the slim default set shows, in the column order.
+        self.assertEqual(
+            app.PROFILE_LIST_VISIBLE_COLUMNS,
+            tuple(column for column in app.DEFAULT_PROFILE_LIST_COLUMNS
+                  if column in app.DEFAULT_VISIBLE_PROFILE_COLUMNS),
+        )
+        self.assertEqual(len(app.PROFILE_LIST_VISIBLE_COLUMNS), 15)
+
+    def test_country_borders_column_follows_the_labels_column(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / "borders.toml"
+            config.write_text(
+                '[profile_list]\ncolumns_version = 11\n'
+                'visible_columns = ["name", "map_labels", "id"]\n'
+                'column_order = ["id", "map_labels", "name"]\n', encoding="utf-8")
+            app.load_configuration(config)
+        self.assertEqual(set(app.PROFILE_LIST_VISIBLE_COLUMNS),
+                         {"name", "image_updates", "map_labels", "map_borders", "id"})
+        # Shorelines (version 17) follows Country borders, hidden.
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:6],
+                         ("id", "short_id", "map_labels", "map_borders", "shorelines", "name"))
+
+    def test_version_nineteen_shows_time_selection_left_of_time(self):
+        config = self.root / "time-selection.toml"
+        config.write_text('[profile_list]\ncolumns_version = 18\nvisible_columns = ["name", "time"]\n'
+                          'column_order = ["time", "name", "location"]\n'
+                          'sort_column = "time"\ncolumn_widths = { time = 224 }\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("time_selection", "time", "name"))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:4], ("time_selection", "time", "name", "location"))
+        self.assertEqual((app.PROFILE_LIST_SORT_COLUMN, app.PROFILE_LIST_COLUMN_WIDTHS["time"]), ("time", 224))
+        # A hidden Time keeps Time selection hidden; version 19 keeps it as saved.
+        config.write_text('[profile_list]\ncolumns_version = 18\nvisible_columns = ["name"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertNotIn("time_selection", app.PROFILE_LIST_VISIBLE_COLUMNS)
+        config.write_text('[profile_list]\ncolumns_version = 19\nvisible_columns = ["time", "name"]\n'
+                          'column_order = ["name", "time", "time_selection"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "time"))
+
+    def test_version_eighteen_shows_the_status_symbol_column_left_of_status(self):
+        config = self.root / "symbols.toml"
+        config.write_text('[profile_list]\ncolumns_version = 17\nvisible_columns = ["name", "active", "id"]\n'
+                          'column_order = ["id", "name", "active", "source"]\n'
+                          'column_widths = { active = 125 }\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("id", "name", "status_symbol", "active"))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:5], ("id", "name", "status_symbol", "active", "source"))
+        # A saved width stays; the new column starts at its default.
+        self.assertEqual(app.PROFILE_LIST_COLUMN_WIDTHS["active"], 125)
+        self.assertEqual(app.PROFILE_LIST_COLUMN_WIDTHS["status_symbol"], 28)
+        # A hidden Status keeps the symbols hidden; version 18 keeps a moved symbol column.
+        config.write_text('[profile_list]\ncolumns_version = 17\nvisible_columns = ["name"]\n'
+                          'column_order = ["active", "name"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name",))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:3], ("status_symbol", "active", "name"))
+        config.write_text('[profile_list]\ncolumns_version = 18\nvisible_columns = ["status_symbol", "name"]\n'
+                          'column_order = ["name", "active", "status_symbol"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "status_symbol"))
+
+    def test_version_fifteen_adds_resolution_hidden_after_resolution_selection(self):
+        config = self.root / "resolution.toml"
+        config.write_text('[profile_list]\ncolumns_version = 14\nvisible_columns = ["name", "output_resolution"]\n'
+                          'column_order = ["name", "output_resolution", "source"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "output_resolution"))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:4], ("name", "output_resolution", "resolution", "source"))
+        # Saved as version 15, a moved Resolution column keeps its place.
+        config.write_text('[profile_list]\ncolumns_version = 15\nvisible_columns = ["resolution"]\n'
+                          'column_order = ["resolution", "name", "output_resolution"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("resolution",))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:3], ("resolution", "name", "output_resolution"))
+
+    def test_selection_becomes_mission_product_and_layer_at_its_place(self):
+        config = self.root / "selection.toml"
+        config.write_text('[profile_list]\ncolumns_version = 15\nvisible_columns = ["name", "selection", "zoom"]\n'
+                          'column_order = ["name", "selection", "zoom"]\nsort_column = "selection"\n'
+                          'column_widths = { selection = 300, zoom = 90 }\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "mission", "product", "layer", "zoom"))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:5], ("name", "mission", "product", "layer", "zoom"))
+        self.assertEqual(app.PROFILE_LIST_SORT_COLUMN, "mission")
+        self.assertEqual(app.PROFILE_LIST_COLUMN_WIDTHS["zoom"], 90)
+        self.assertNotIn("selection", app.PROFILE_LIST_COLUMN_WIDTHS)
+        # A hidden Selection leaves the three columns hidden.
+        config.write_text('[profile_list]\ncolumns_version = 15\nvisible_columns = ["name"]\n'
+                          'column_order = ["selection", "name"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name",))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:4], ("mission", "product", "layer", "name"))
+
+    def test_image_save_notice_names_when_the_saved_settings_show(self):
+        now = dt.datetime(2026, 10, 7, 17, 30, tzinfo=dt.timezone.utc)
+        self.assertEqual(app.image_save_notice(True, False, 15, "utc", now),
+                         "✓ Saved - loads at the next update (17:45 UTC)")
+        # A later day names its date.
+        self.assertEqual(app.image_save_notice(True, False, 60 * 24, "utc", now),
+                         "✓ Saved - loads at the next update (2026-10-08 17:30 UTC)")
+        self.assertEqual(app.image_save_notice(True, True, 15, "utc", now),
+                         "✓ Saved - rotation keeps showing its profiles")
+        self.assertEqual(app.image_save_notice(False, False, 15, "utc", now), "✓ Saved")
+        local = (now + dt.timedelta(minutes=15)).astimezone()
+        self.assertEqual(app.image_save_notice(True, False, 15, "system", now),
+                         f"✓ Saved - loads at the next update ({local:%H:%M})")
+
+    def test_automatic_resolution_choice_takes_the_smallest_sharp_size(self):
+        choices = [("a", 678, 678), ("b", 1808, 1808), ("c", 5424, 5424)]
+        self.assertEqual(app.automatic_resolution_choice(choices, (1920, 1080), "fit", 1), "b")
+        self.assertEqual(app.automatic_resolution_choice(choices, (1920, 1080), "crop", 1), "c")
+        self.assertEqual(app.automatic_resolution_choice(choices, (1920, 1080), "fit", 4), "c")
+        self.assertEqual(app.automatic_resolution_choice(choices, (8000, 8000), "fit", 1), "c")
+
+    def test_version_twelve_adds_short_id_hidden_after_the_profile_id(self):
+        config = self.root / "short-id.toml"
+        config.write_text('[profile_list]\ncolumns_version = 12\nvisible_columns = ["name", "id"]\n'
+                          'column_order = ["name", "id", "source"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        # A saved column choice keeps its columns; Short ID is offered under Columns.
+        # Version 14 adds the Updates column visibly.
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "id", "image_updates"))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:4], ("name", "id", "short_id", "source"))
+        # Once saved as version 13, a deliberately moved Short ID keeps its place.
+        config.write_text('[profile_list]\ncolumns_version = 13\nvisible_columns = ["short_id", "name"]\n'
+                          'column_order = ["short_id", "name", "id"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("short_id", "name", "image_updates"))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:3], ("short_id", "name", "id"))
+
+    def test_unchanged_map_overlays_keep_copernicus_image_keys(self):
+        """Selections that draw borders like their labels keep their cached images."""
+        configuration = app.capture_loaded_configuration()
+        configuration["IMAGE_SOURCE"] = "copernicus"
+        profile = dict(app.SOURCE_PROFILES["copernicus"], map_labels=True, map_label_color="#FFFFFF",
+                       scene_no_data_color="transparent")
+        frame = {"profile": profile, "timestamp": "2026-09-30T00:00:00Z"}
+        # Keys from before borders, scene No-data colors and Use auto recommendation existed.
+        older = {key: value for key, value in profile.items()
+                 if key not in {"map_borders", "map_border_color", "scene_no_data_color",
+                                "auto_recommendation", "auto_priority", "auto_precise"}}
+        for borders, color in ((True, "#FFFFFF"), (False, "#FFFFFF"), (True, "#000000")):
+            profile.update(map_borders=borders, map_border_color=color)
+            configuration["SOURCE_PROFILES"] = {**app.SOURCE_PROFILES, "copernicus": dict(profile)}
+            key = app.image_configuration_key(configuration)
+            signature = app.copernicus_frame_signature(frame)
+            if (borders, color) == (True, "#FFFFFF"):
+                self.assertEqual(key["selection"], older)
+                self.assertEqual(signature, app.copernicus_frame_signature({**frame, "profile": older}))
+            else:
+                self.assertEqual(key["selection"]["map_borders"], borders)
+                self.assertEqual(signature[-3:-1], (borders, color))
+
+    def test_map_background_no_data_keeps_copernicus_image_keys(self):
+        """Regular layers that keep the map background keep their cached images."""
+        configuration = app.capture_loaded_configuration()
+        configuration["IMAGE_SOURCE"] = "copernicus"
+        profile = dict(app.SOURCE_PROFILES["copernicus"], scene_no_data_color="transparent")
+        older = {key: value for key, value in profile.items() if key != "scene_no_data_color"}
+        frame = {"profile": profile, "timestamp": "2026-09-30T00:00:00Z"}
+        configuration["SOURCE_PROFILES"] = {**app.SOURCE_PROFILES, "copernicus": dict(profile)}
+        self.assertNotIn("scene_no_data_color", app.image_configuration_key(configuration)["selection"])
+        self.assertEqual(app.copernicus_frame_signature(frame),
+                         app.copernicus_frame_signature({**frame, "profile": older}))
+        for color in ("blur", "#000000"):
+            profile["scene_no_data_color"] = color
+            configuration["SOURCE_PROFILES"] = {**app.SOURCE_PROFILES, "copernicus": dict(profile)}
+            with self.subTest(color=color):
+                self.assertEqual(app.image_configuration_key(configuration)["selection"]["scene_no_data_color"],
+                                 color)
+                self.assertEqual(app.copernicus_frame_signature(frame)[-2], ("scene_no_data_color", color))
+
+    def test_only_layers_given_a_data_mask_alpha_change_their_image_keys(self):
+        product = app.get_copernicus_product("DEFAULT-THEME", "DEFAULT-THEME::ed94c7")
+        profile = dict(app.SOURCE_PROFILES["copernicus"], scene_no_data_color="transparent")
+        frame = {"profile": profile, "timestamp": "2026-09-16T20:48:11Z"}
+        thermal = {**frame, "layer": app.get_copernicus_layer(product, "9_THERMAL")}
+        wildfires = {**frame, "layer": app.get_copernicus_layer(product, "3_WILDFIRES")}
+        self.assertEqual(app.copernicus_frame_signature(thermal), app.copernicus_frame_signature(frame))
+        self.assertEqual(app.copernicus_frame_signature(wildfires)[-2], ("data_mask_alpha", True))
+
+    def test_profile_list_columns_are_loaded_and_saved_in_configuration(self):
+        config = self.root / "profile-list.toml"
+        config.write_text(
+            '[profile_list]\nvisible_columns = ["name", "location", "latitude", "longitude"]\n',
+            encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(
+            app.PROFILE_LIST_VISIBLE_COLUMNS,
+            ("name", "status_symbol", "active", "history", "image_updates", "quarter_mode", "quarter_offset", "quarter_target",
+             "location", "latitude", "longitude",
+             "cloud_coverage", "mosaic_brightness", "zoom", "maximum_lookback",
+             "output_resolution", "map_labels", "map_borders", "cache_status", "last_download", "id", "no_data_color",
+             "image_size", "mosaic_contrast", "auto_brightness", "auto_contrast"),
+        )
+
+        config.write_text(
+            '[profile_list]\ncolumns_version = 2\n'
+            'visible_columns = ["name", "gap_fill"]\n', encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS,
+                         ("name", "status_symbol", "active", "history", "image_updates", "quarter_mode", "quarter_offset",
+                          "quarter_target", "gap_fill", "zoom", "maximum_lookback",
+                          "output_resolution", "map_labels", "map_borders", "cache_status", "last_download", "id", "no_data_color",
+                          "image_size", "mosaic_contrast", "auto_brightness", "auto_contrast"))
+
+        config.write_text(
+            '[profile_list]\ncolumns_version = 3\n'
+            'visible_columns = ["name", "gap_fill"]\n', encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "status_symbol", "active", "history", "image_updates", "gap_fill", "zoom", "maximum_lookback",
+                         "output_resolution", "map_labels", "map_borders", "cache_status", "last_download", "id", "no_data_color",
+                         "image_size", "mosaic_contrast", "auto_brightness", "auto_contrast"))
+
+        config.write_text(
+            '[profile_list]\nvisible_columns = ["name", "coverage"]\n',
+            encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(
+            app.PROFILE_LIST_VISIBLE_COLUMNS,
+            ("name", "status_symbol", "active", "history", "image_updates", "quarter_mode", "quarter_offset", "quarter_target",
+             "gap_fill", "cloud_coverage", "mosaic_brightness", "zoom", "maximum_lookback",
+             "output_resolution", "map_labels", "map_borders", "cache_status", "last_download", "id", "no_data_color",
+             "image_size", "mosaic_contrast", "auto_brightness", "auto_contrast"),
+        )
+
+        older = '[source]\nprovider = "eumetsat"\n'
+        updated = app.ensure_profile_list_configuration_section(older)
+        updated = app.replace_toml_section_value(
+            updated,
+            "profile_list",
+            "visible_columns",
+            ["name", "latitude", "longitude"],
+        )
+        self.assertEqual(
+            tomllib.loads(updated)["profile_list"]["visible_columns"],
+            ["name", "latitude", "longitude"],
+        )
+
+    def test_table_sort_and_empty_visibility_roundtrip_and_reset(self):
+        from marblescape_profile_settings import PROFILE_LIST_COLUMNS
+        self.assertEqual(app.DEFAULT_PROFILE_LIST_COLUMNS, PROFILE_LIST_COLUMNS)
+        config = self.root / "table-sort.toml"
+        for column in ("", *PROFILE_LIST_COLUMNS):
+            with self.subTest(column=column):
+                config.write_text('[profile_list]\ncolumns_version = 14\nvisible_columns = []\n'
+                                  f'sort_column = "{column}"\nsort_descending = true\n', encoding="utf-8")
+                app.load_configuration(config)
+                self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ())
+                self.assertEqual(app.PROFILE_LIST_SORT_COLUMN, column)
+                self.assertEqual(app.PROFILE_LIST_SORT_DESCENDING, bool(column))
+        config.write_text("", encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_SORT_COLUMN, "")
+        self.assertFalse(app.PROFILE_LIST_SORT_DESCENDING)
+        self.assertEqual(set(app.PROFILE_LIST_VISIBLE_COLUMNS), set(app.DEFAULT_VISIBLE_PROFILE_COLUMNS))
+
+    def test_version_ten_shows_history_next_to_active_in_saved_order(self):
+        config = self.root / "history-column.toml"
+        config.write_text('[profile_list]\ncolumns_version = 10\nvisible_columns = ["name", "active"]\n'
+                          'column_order = ["id", "name", "active", "source"]\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "status_symbol", "active", "history", "image_updates"))
+        self.assertEqual(app.PROFILE_LIST_COLUMN_ORDER[:8],
+                         ("id", "short_id", "name", "status_symbol", "active", "history", "image_updates", "source"))
+        # Once saved as version 11, a hidden History column stays hidden.
+        config.write_text('[profile_list]\ncolumns_version = 11\nvisible_columns = ["name", "active"]\n',
+                          encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "status_symbol", "active", "image_updates"))
+        # Once saved as version 14, a hidden Updates column stays hidden too.
+        config.write_text('[profile_list]\ncolumns_version = 14\nvisible_columns = ["name", "active"]\n',
+                          encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "status_symbol", "active"))
+
+    def test_table_preferences_reject_invalid_types_and_columns(self):
+        config = self.root / "invalid-table.toml"
+        for value in ('sort_column = "unknown"', 'sort_column = 1', 'sort_column = []',
+                      'sort_descending = "false"', 'sort_descending = 0',
+                      'visible_columns = ["zoom", "zoom"]', 'visible_columns = ["unknown"]',
+                      'visible_columns = [1]', 'columns_version = 20'):
+            with self.subTest(value=value):
+                config.write_text("[profile_list]\n" + value + "\n", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "profile_list"):
+                    app.load_configuration(config)
+
+    def test_version_eight_does_not_restore_deliberately_hidden_new_columns(self):
+        config = self.root / "hidden-table.toml"
+        config.write_text('[profile_list]\ncolumns_version = 8\nvisible_columns = ["name"]\n'
+                          'sort_column = "zoom"\nsort_descending = true\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_VISIBLE_COLUMNS, ("name", "status_symbol", "active", "history", "image_updates"))
+        self.assertEqual(app.PROFILE_LIST_SORT_COLUMN, "zoom")
+        self.assertTrue(app.PROFILE_LIST_SORT_DESCENDING)
+
+    def test_table_preferences_do_not_change_image_or_cache_keys(self):
+        before = app.capture_loaded_configuration()
+        after = deepcopy(before)
+        after.update(PROFILE_LIST_VISIBLE_COLUMNS=(), PROFILE_LIST_SORT_COLUMN="zoom",
+                     PROFILE_LIST_SORT_DESCENDING=True, PROFILE_LIST_COLUMN_WIDTHS={"name": 400})
+        self.assertEqual(app.image_configuration_key(before), app.image_configuration_key(after))
+        self.assertEqual(app.image_cache_configuration_key(before), app.image_cache_configuration_key(after))
+
+    def test_column_width_config_roundtrip_supports_defaults_inline_and_subtable(self):
+        from marblescape_profiles import DEFAULT_PROFILE_COLUMN_WIDTHS
+        config = self.root / "widths.toml"
+        widths = dict(DEFAULT_PROFILE_COLUMN_WIDTHS, name=317, id=444, cache_status=500)
+        variants = ('[profile_list]\n', '[profile_list]\ncolumn_widths = {} # widths\n',
+                    '[profile_list]\n[profile_list.column_widths]\nname = 200 # saved\n')
+        for text in variants:
+            with self.subTest(text=text):
+                updated = app.replace_profile_column_widths(text, widths)
+                self.assertEqual(tomllib.loads(updated)["profile_list"]["column_widths"], widths)
+                config.write_text(updated, encoding="utf-8")
+                app.load_configuration(config)
+                self.assertEqual(app.PROFILE_LIST_COLUMN_WIDTHS, widths)
+                snapshot = app.capture_loaded_configuration()
+                app.PROFILE_LIST_COLUMN_WIDTHS["name"] = 420
+                self.assertEqual(snapshot["PROFILE_LIST_COLUMN_WIDTHS"], widths)
+                app.restore_loaded_configuration(snapshot)
+                snapshot["PROFILE_LIST_COLUMN_WIDTHS"]["name"] = 450
+                self.assertEqual(app.PROFILE_LIST_COLUMN_WIDTHS, widths)
+                updated = app.replace_profile_column_widths(updated, dict(widths, name=330))
+                self.assertEqual(tomllib.loads(updated)["profile_list"]["column_widths"]["name"], 330)
+        config.write_text('[profile_list]\ncolumn_widths = { name = 315 }\n', encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_COLUMN_WIDTHS, dict(DEFAULT_PROFILE_COLUMN_WIDTHS, name=315))
+        config.write_text("", encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.PROFILE_LIST_COLUMN_WIDTHS, DEFAULT_PROFILE_COLUMN_WIDTHS)
+
+    def test_column_width_config_rejects_invalid_values(self):
+        config = self.root / "invalid-widths.toml"
+        for value in ('[]', 'false', '{ unknown = 100 }', '{ name = true }',
+                      '{ name = "200" }', '{ name = 200.5 }', '{ name = 0 }',
+                      '{ name = -1 }', '{ name = 44 }', '{ id = 79 }', '{ name = 16385 }'):
+            with self.subTest(value=value):
+                config.write_text('[profile_list]\ncolumn_widths = ' + value + '\n', encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, r"profile_list\.column_widths"):
+                    app.load_configuration(config)
+
+    def test_copernicus_gap_fill_configuration_key_roundtrips(self):
+        config = self.root / "gap-fill.toml"
+        config.write_text(
+            '[sources.copernicus]\ngap_fill_mode = "fill_gaps"\n'
+            'mission = "Sentinel-2"\nproduct = "DEFAULT-THEME::a91f72"\n'
+            'layer = "1_TRUE_COLOR"\nlookback_days = 30\n', encoding="utf-8",
+        )
+        app.load_configuration(config)
+        self.assertEqual(app.SOURCE_PROFILES["copernicus"]["coverage_mode"], "fill_gaps")
+        updated = app.replace_source_configuration(
+            config.read_text(encoding="utf-8"), "copernicus", app.SOURCE_PROFILES,
+        )
+        self.assertEqual(tomllib.loads(updated)["sources"]["copernicus"]["gap_fill_mode"],
+                         "fill_gaps")
+        self.assertNotIn("coverage_mode", tomllib.loads(updated)["sources"]["copernicus"])
+
+    def test_source_defaults_and_normalized_profiles_are_independent_copies(self):
+        provider, first = app.normalize_source_configuration("eumetsat", {})
+        _, second = app.normalize_source_configuration("eumetsat", {})
+        self.assertEqual(provider, "eumetsat")
+        for source in app.AUTO_RESOLUTION_PROVIDERS:
+            self.assertEqual(app.DEFAULT_SOURCE_PROFILES[source]["resolution"], "auto")
+            self.assertEqual(second[source]["resolution"], "auto")
+        first["goes_east"]["product"] = "13"
+        self.assertEqual(second["goes_east"]["product"], "GEOCOLOR")
+        self.assertEqual(app.DEFAULT_SOURCE_PROFILES["goes_east"]["product"], "GEOCOLOR")
+        self.assertEqual(second["himawari"], {
+            "area": "nict_full_disk", "product": "true_color", "resolution": "auto",
+            "shorelines": False, "shoreline_color": "#FFFF00",
+            "center": False, "latitude": 0.0, "longitude": 140.7,
+        })
+        self.assertEqual(second["slider"], {
+            "area": "goes-19---full_disk", "product": "geocolor", "resolution": "auto"
+        })
+        self.assertEqual(second["worldview"], {
+            "area": "VIIRS_NOAA20_CorrectedReflectance_TrueColor",
+            "product": "latest", "resolution": "auto",
+        })
+        source = {"solar": {"area": "sun", "product": "Fe094", "resolution": "600x600"}}
+        _, normalized = app.normalize_source_configuration("solar", source)
+        source["solar"]["product"] = "Fe304"
+        self.assertEqual(normalized["solar"]["product"], "Fe094")
+
+    def test_first_start_uses_auto_and_later_preserves_user_resolution(self):
+        template = app.DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8")
+        packaged_defaults = tomllib.loads(template)
+        for provider in app.AUTO_RESOLUTION_PROVIDERS:
+            self.assertEqual(packaged_defaults["sources"][provider]["resolution"], "auto")
+        for provider in app.AUTO_RESOLUTION_PROVIDERS:
+            template = app.replace_toml_section_value(
+                template, f"sources.{provider}", "resolution", "largest"
+            )
+        template_path = self.root / "old-defaults.toml"
+        config_path = self.root / "fresh-settings.toml"
+        template_path.write_text(template, encoding="utf-8")
+        with patch.object(app, "DEFAULT_CONFIG_PATH", config_path), \
+             patch.object(app, "DEFAULT_CONFIG_TEMPLATE_PATH", template_path):
+            app.load_configuration(config_path)
+            created = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            for provider in app.AUTO_RESOLUTION_PROVIDERS:
+                self.assertEqual(created["sources"][provider]["resolution"], "auto")
+                self.assertEqual(app.SOURCE_PROFILES[provider]["resolution"], "auto")
+            updated = app.replace_toml_section_value(
+                config_path.read_text(encoding="utf-8"),
+                "sources.goes_west", "resolution", "largest",
+            )
+            config_path.write_text(updated, encoding="utf-8")
+            app.load_configuration(config_path)
+            self.assertEqual(app.SOURCE_PROFILES["goes_west"]["resolution"], "largest")
+            self.assertEqual(app.SOURCE_PROFILES["goes_east"]["resolution"], "auto")
+
+    def test_automatic_resolution_uses_smallest_source_that_avoids_upscaling(self):
+        client = SimpleNamespace(list_products=Mock(return_value=[{
+            "id": "GEOCOLOR",
+            "resolutions": ["900x540", "1800x1080", "3600x2160"],
+        }]))
+        profile = {"area": "full_disk", "product": "GEOCOLOR", "resolution": "auto"}
+
+        self.assertEqual(
+            app.choose_automatic_source_resolution(
+                client, "goes_east", profile, (1920, 1080), "fit", 1.0
+            ),
+            "1800x1080",
+        )
+        self.assertEqual(
+            app.choose_automatic_source_resolution(
+                client, "goes_east", profile, (1920, 1080), "crop", 1.0
+            ),
+            "3600x2160",
+        )
+        self.assertEqual(
+            app.choose_automatic_source_resolution(
+                client, "goes_east", profile, (1920, 1080), "fit", 2.0
+            ),
+            "3600x2160",
+        )
+
+    def test_automatic_resolution_compares_slider_sectors_without_their_padding(self):
+        client = SimpleNamespace(list_products=Mock(return_value=[{
+            "id": "geocolor",
+            "resolutions": ["1000x1000", "2000x2000"],
+            "effective_resolutions": {"1000x1000": "1000x600", "2000x2000": "2000x1200"},
+        }]))
+        profile = {"area": "goes-19---conus", "product": "geocolor", "resolution": "auto"}
+        # The 1000x1000 grid would cover 1600x900, but its visible 1000x600 sector does not.
+        self.assertEqual(app.choose_automatic_source_resolution(
+            client, "slider", profile, (1600, 900), "fit", 1.0), "2000x2000")
+        frame = {"timestamp": "2026-10-03T00:00:00Z", "url": "https://example/tile.png"}
+        with patch.dict(app.SOURCE_PROFILES["slider"], profile):
+            square = app.slider_frame_signature({**frame, "content_box": [0.0, 0.0, 1.0, 1.0]})
+            self.assertEqual(square, app.slider_frame_signature(frame))
+            padded = app.slider_frame_signature({**frame, "content_box": [0.0, 0.2, 1.0, 0.8]})
+            self.assertIn(("content_box", (0.0, 0.2, 1.0, 0.8)), padded)
+
+    def test_automatic_resolution_covers_all_active_monitors(self):
+        client = SimpleNamespace(list_products=Mock(return_value=[{
+            "id": "GEOCOLOR",
+            "resolutions": ["1280x720", "2560x1440", "3072x2048"],
+        }]))
+        profile = {"area": "full_disk", "product": "GEOCOLOR", "resolution": "auto"}
+        monitors = [
+            {"id": "A", "rect": (0, 0, 2560, 1440)},
+            {"id": "B", "rect": (-1050, 0, 0, 1680)},
+        ]
+        with patch.object(app, "SET_WINDOWS_WALLPAPER", True), \
+             patch.object(app, "VIEW_MODE", "crop"), \
+             patch.object(app, "ZOOM", 1.0), \
+             patch.object(app, "WINDOWS_WALLPAPER_POSITION", "fit"), \
+             patch.object(app, "WINDOWS_WALLPAPER_MONITOR_POSITIONS", {}), \
+             patch.object(app, "WINDOWS_WALLPAPER_MONITOR_OUTPUTS", {}), \
+             patch.object(app, "list_windows_wallpaper_monitors", return_value=monitors):
+            self.assertEqual(app.automatic_source_output_size((1280, 720)),
+                             (2560, 1680))
+            self.assertEqual(app._resolved_profile_resolution(
+                client, "goes_east", profile, (1280, 720)), "3072x2048")
+            profile["resolution"] = "2560x1440"
+            self.assertEqual(app._resolved_profile_resolution(
+                client, "goes_east", profile, (1280, 720)), "2560x1440")
+            with patch.object(app, "WINDOWS_WALLPAPER_MONITOR_OUTPUTS", {
+                "B": {"width": 4000, "height": 0, "aspect_ratio": "16:9"},
+            }):
+                self.assertEqual(app.automatic_source_output_size((1280, 720)),
+                                 (4000, 2250))
+
+    def test_automatic_resolution_ignores_monitors_with_no_wallpaper(self):
+        monitors = [
+            {"id": "A", "rect": (0, 0, 2560, 1440)},
+            {"id": "B", "rect": (2560, 0, 3840, 720)},
+        ]
+        with patch.object(app, "SET_WINDOWS_WALLPAPER", True), \
+             patch.object(app, "WINDOWS_WALLPAPER_POSITION", "fit"), \
+             patch.object(app, "WINDOWS_WALLPAPER_MONITOR_POSITIONS", {"A": "none"}), \
+             patch.object(app, "WINDOWS_WALLPAPER_MONITOR_OUTPUTS", {}), \
+             patch.object(app, "list_windows_wallpaper_monitors", return_value=monitors):
+            self.assertEqual(app.automatic_source_output_size((800, 600)),
+                             (1280, 720))
+
+    def test_disabled_updates_reuse_matching_latest_without_provider_contact(self):
+        app.IMAGE_SOURCE = "eumetsat"
+        app.CHECK_FOR_SOURCE_UPDATES = False
+        app.ensure_directories()
+        signature = app.image_cache_configuration_key(app.capture_loaded_configuration())
+        data = self.make_png({}, (32, 18))
+        installed = app.save_latest_image(data, signature, (32, 18))
+        self.assertIsNotNone(installed)
+
+        app.main(["--once"], configuration_loaded=True)
+
+        self.wms.assert_not_called()
+        self.client.latest.assert_not_called()
+        self.assertEqual(app.get_current_image_path(), installed)
+
+    def test_force_update_bypasses_matching_saved_image_when_checks_are_disabled(self):
+        app.IMAGE_SOURCE = "goes_east"
+        app.CHECK_FOR_SOURCE_UPDATES = False
+        app.ensure_directories()
+        signature = app.image_cache_configuration_key(app.capture_loaded_configuration())
+        app.save_latest_image(self.make_png({}, (32, 18)), signature, (32, 18))
+        app.FORCE_UPDATE_EVENT.set()
+
+        app.main(["--once"], configuration_loaded=True)
+
+        self.client.latest.assert_called_once()
+        self.client.fetch_image.assert_called_once()
+
+    def test_invalid_source_profiles_are_rejected_before_network_access(self):
+        cases = [
+            ("unknown", {}),
+            ("goes_east", []),
+            ("goes_east", {"goes_east": "invalid"}),
+            ("goes_east", {"goes_east": {"area": ""}}),
+            ("goes_east", {"goes_east": {"product": 13}}),
+            ("goes_east", {"goes_east": {"resolution": "0x1080"}}),
+            ("goes_east", {"goes_east": {"resolution": "1920 by 1080"}}),
+        ]
+        for provider, profiles in cases:
+            with self.subTest(provider=provider, profiles=profiles):
+                with self.assertRaises(ValueError):
+                    app.normalize_source_configuration(provider, profiles)
+        self.client_factory.assert_not_called()
+        self.wms.assert_not_called()
+
+    def test_capture_and_restore_do_not_alias_source_profiles(self):
+        app.SOURCE_PROFILES["goes_east"]["product"] = "13"
+        snapshot = app.capture_loaded_configuration()
+        app.IMAGE_SOURCE = "solar"
+        app.SOURCE_PROFILES["goes_east"]["product"] = "01"
+        self.assertEqual(snapshot["SOURCE_PROFILES"]["goes_east"]["product"], "13")
+        app.restore_loaded_configuration(snapshot)
+        self.assertEqual(app.IMAGE_SOURCE, "goes_east")
+        self.assertEqual(app.SOURCE_PROFILES["goes_east"]["product"], "13")
+        app.SOURCE_PROFILES["goes_east"]["product"] = "02"
+        self.assertEqual(snapshot["SOURCE_PROFILES"]["goes_east"]["product"], "13")
+
+    def test_display_time_zone_does_not_change_the_image_cache_key(self):
+        configuration = app.capture_loaded_configuration()
+        changed = deepcopy(configuration)
+        changed["DISPLAY_TIME_ZONE"] = "utc"
+        self.assertEqual(
+            app.image_configuration_key(configuration),
+            app.image_configuration_key(changed),
+        )
+
+    def test_window_appearance_is_loaded_but_never_changes_the_image(self):
+        configuration = app.capture_loaded_configuration()
+        changed = deepcopy(configuration)
+        changed["APPEARANCE"] = "dark"
+        self.assertEqual(app.image_configuration_key(configuration),
+                         app.image_configuration_key(changed))
+        config = self.root / "appearance.toml"
+        text = app.DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8")
+        config.write_text(text.replace('appearance = "system"', 'appearance = "dark"'), encoding="utf-8")
+        app.load_configuration(config)
+        self.assertEqual(app.APPEARANCE, "dark")
+        config.write_text(text.replace('appearance = "system"', 'appearance = "dim"'), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "Appearance must be system, light or dark"):
+            app.load_configuration(config)
+
+    def test_example_remains_valid_for_eumetsat_without_live_lookup(self):
+        app.load_configuration(app.DEFAULT_CONFIG_TEMPLATE_PATH)
+        self.assertEqual(app.IMAGE_SOURCE, "eumetsat")
+        app.validate_configuration()
+        self.assertEqual(app.get_selected_wms_layer_name(), "mtg_fd:rgb_geocolour")
+        self.wms.assert_not_called()
+
+    def test_noaa_render_plan_does_not_resolve_wms_or_cap_source_to_4000(self):
+        app.WIDTH, app.HEIGHT, app.ASPECT_RATIO = 7680, 4320, "16:9"
+        app.PROJECTION = "unused projection"
+        app.LAYER_CONFIG = []
+        with patch.object(app, "get_active_view", side_effect=AssertionError("WMS view")), \
+             patch.object(app, "resolve_configured_layers", side_effect=AssertionError("WMS layer")), \
+             patch.object(app, "get_render_dimensions", side_effect=AssertionError("WMS size cap")):
+            app.validate_configuration()
+            plan = app.prepare_runtime_render_plan({})
+        self.assertEqual(plan[:4], (7680, 4320, 7680, 4320))
+        self.assertEqual(plan[9], "noaa")
+        self.client_factory.assert_not_called()
+        self.wms.assert_not_called()
+
+    def test_once_each_noaa_source_installs_png_without_wms_or_active_config_write(self):
+        sentinel = b"Do not modify this configuration."
+        app.ACTIVE_CONFIG_PATH.write_bytes(sentinel)
+        for provider in ("goes_east", "goes_west", "solar"):
+            with self.subTest(provider=provider):
+                app.IMAGE_SOURCE = provider
+                app.main(["--once"], configuration_loaded=True)
+                profile = app.SOURCE_PROFILES[provider]
+                args = self.client.latest.call_args.args
+                self.assertEqual(args[:3], (provider, profile["area"], profile["product"]))
+                self.assertNotEqual(args[3], "auto")
+                self.assert_installed_png()
+                self.assertEqual(app.IMAGE_STATUS["provider"], provider)
+                self.assertEqual(app.ACTIVE_CONFIG_PATH.read_bytes(), sentinel)
+        self.wms.assert_not_called()
+        self.wallpaper.assert_not_called()
+        self.assertEqual(self.client.fetch_image.call_count, 3)
+
+    def test_once_himawari_source_installs_png_without_wms(self):
+        app.IMAGE_SOURCE = "himawari"
+        frame = dict(self.frame, source="himawari", kind="nict")
+        client = SimpleNamespace(
+            latest=Mock(return_value=frame),
+            fetch_image=Mock(side_effect=self.make_png),
+        )
+        with patch.object(app, "get_himawari_client", return_value=client):
+            app.main(["--once"], configuration_loaded=True)
+        profile = app.SOURCE_PROFILES["himawari"]
+        client.latest.assert_called_once_with(
+            "himawari", profile["area"], profile["product"], "largest"
+        )
+        client.fetch_image.assert_called_once()
+        self.assertEqual(app.IMAGE_STATUS["provider"], "himawari")
+        self.assert_installed_png()
+        self.wms.assert_not_called()
+
+    def test_once_slider_source_installs_latest_clean_tiled_png_without_wms(self):
+        app.IMAGE_SOURCE = "slider"
+        frame = dict(self.frame, source="slider", expected_interval_seconds=600)
+        client = SimpleNamespace(
+            latest=Mock(return_value=frame),
+            fetch_image=Mock(side_effect=self.make_png),
+        )
+        with patch.object(app, "get_slider_client", return_value=client):
+            app.main(["--once"], configuration_loaded=True)
+        profile = app.SOURCE_PROFILES["slider"]
+        client.latest.assert_called_once_with(
+            "slider", profile["area"], profile["product"], "largest"
+        )
+        client.fetch_image.assert_called_once()
+        self.assertEqual(app.IMAGE_STATUS["provider"], "slider")
+        self.assert_installed_png()
+        self.wms.assert_not_called()
+
+    def test_once_worldview_source_installs_latest_gibs_png_without_eumetsat_wms(self):
+        app.IMAGE_SOURCE = "worldview"
+        frame = dict(
+            self.frame, source="worldview", expected_interval_seconds=86400,
+            fixed_time=False,
+        )
+        client = SimpleNamespace(
+            latest=Mock(return_value=frame),
+            fetch_image=Mock(side_effect=self.make_png),
+        )
+        with patch.object(app, "get_worldview_client", return_value=client):
+            app.main(["--once"], configuration_loaded=True)
+        profile = app.SOURCE_PROFILES["worldview"]
+        client.latest.assert_called_once_with(
+            "worldview", profile["area"], profile["product"], "largest"
+        )
+        client.fetch_image.assert_called_once()
+        self.assertEqual(app.IMAGE_STATUS["provider"], "worldview")
+        self.assert_installed_png()
+        self.wms.assert_not_called()
+
+    def test_print_urls_and_validate_config_do_not_fetch_or_install_images(self):
+        for option in ("--print-urls", "--validate-config"):
+            with self.subTest(option=option):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    app.main([option], configuration_loaded=True)
+                if option == "--print-urls":
+                    self.assertIn(self.frame["url"], output.getvalue())
+                else:
+                    self.assertTrue(any(
+                        "valid against the NOAA catalog" in str(call)
+                        for call in self.log.call_args_list
+                    ))
+        self.client.fetch_image.assert_not_called()
+        self.wms.assert_not_called()
+        self.assertFalse(app.LATEST_DIR.exists())
+
+    def test_once_download_failure_propagates_and_runner_returns_nonzero(self):
+        self.client.fetch_image.side_effect = RuntimeError("image incomplete")
+        with self.assertRaisesRegex(RuntimeError, "image incomplete"):
+            app.main(["--once"], configuration_loaded=True)
+        self.assertEqual(app.get_latest_image_files(), [])
+        self.assertIsNone(app.IMAGE_STATUS["timestamp"])
+        self.assertIn("image incomplete", app.IMAGE_STATUS["error"])
+        exit_code = app.run_application(
+            ["--once"], configuration_loaded=True, pause_on_error=False
+        )
+        self.assertNotEqual(exit_code, 0)
+        self.wms.assert_not_called()
+
+    def test_failed_download_keeps_previous_wallpaper(self):
+        app.main(["--once"], configuration_loaded=True)
+        existing = self.assert_installed_png()
+        original = existing.read_bytes()
+        self.client.latest.return_value = dict(
+            self.frame,
+            timestamp="2026-09-11T12:10:00Z",
+            url=self.frame["url"].replace("1200_", "1210_"),
+        )
+        self.client.fetch_image.side_effect = RuntimeError("HTTP 503")
+        with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
+            app.main(["--once"], configuration_loaded=True)
+        self.assertEqual(app.get_latest_image_files(), [existing])
+        self.assertEqual(existing.read_bytes(), original)
+
+    def test_reload_during_fetch_keeps_the_frame_in_the_cache_only(self):
+        import marblescape_snapshot as system
+
+        def fetch_then_change_source(frame, dimensions, **options):
+            data = self.make_png(frame, dimensions, **options)
+            app.CONFIGURATION_RELOAD_EVENT.set()
+            return data
+        self.client.fetch_image.side_effect = fetch_then_change_source
+        with patch.object(app, "save_latest_image") as save_image:
+            with self.assertRaisesRegex(app.UpdateSuperseded, "kept in the cache of Latest snapshot"):
+                app.perform_update("noaa", [{"frame": self.frame}], 32, 18, 32, 18,
+                                   cache_configuration_signature={"test": 1},
+                                   cache_source_signature=("frame",))
+        # Neither Latest nor the source status change; the picture waits in its cache.
+        save_image.assert_not_called()
+        self.assertIsNone(app.IMAGE_STATUS["timestamp"])
+        entry = app.get_profile_cache().entries([system.CACHE_ID])[system.CACHE_ID]
+        self.assertEqual(entry["width"], 32)
+        self.assertFalse(app.DOWNLOAD_PROGRESS.snapshot()["active"])
+
+    def test_user_cancel_keeps_existing_image_and_is_not_a_source_error(self):
+        existing = app.LATEST_DIR / "marblescape_existing.png"
+        existing.parent.mkdir(parents=True, exist_ok=True)
+        existing.write_bytes(self.make_png({}, (32, 18)))
+        app.set_current_image_path(existing)
+
+        def cancel_fetch(frame, dimensions, **options):
+            del frame, dimensions, options
+            self.assertTrue(app.DOWNLOAD_PROGRESS.request_cancel())
+            app.DOWNLOAD_PROGRESS.raise_if_cancelled()
+
+        self.client.fetch_image.side_effect = cancel_fetch
+        app.RUN_CONTINUOUSLY = True
+        with patch.object(app, "sleep_until_next_cycle", return_value=False), \
+             patch.object(app, "save_latest_image") as save_image:
+            app.main([], configuration_loaded=True)
+
+        save_image.assert_not_called()
+        self.assertEqual(app.get_current_image_path(), existing)
+        self.assertEqual(app.IMAGE_STATUS["error"], "")
+        self.assertTrue(app.DOWNLOAD_PROGRESS.snapshot()["cancelled"])
+
+    def test_signature_distinguishes_source_area_product_size_time_and_url(self):
+        baseline = app.noaa_frame_signature(self.frame)
+        for field, value in (("area", "continental"), ("product", "13"), ("resolution", "678x678")):
+            with self.subTest(field=field):
+                old = app.SOURCE_PROFILES["goes_east"][field]
+                app.SOURCE_PROFILES["goes_east"][field] = value
+                self.assertNotEqual(app.noaa_frame_signature(self.frame), baseline)
+                app.SOURCE_PROFILES["goes_east"][field] = old
+        app.IMAGE_SOURCE = "goes_west"
+        self.assertNotEqual(app.noaa_frame_signature(self.frame), baseline)
+        app.IMAGE_SOURCE = "goes_east"
+        for field, value in (("timestamp", "2026-09-11T12:10:00Z"), ("url", self.frame["url"] + "?updated")):
+            with self.subTest(field=field):
+                frame = dict(self.frame, **{field: value})
+                self.assertNotEqual(app.noaa_frame_signature(frame), baseline)
+
+    def test_unchanged_frame_skips_second_download(self):
+        app.RUN_CONTINUOUSLY = True
+        with patch.object(app, "sleep_until_next_cycle", side_effect=[True, False]):
+            app.main([], configuration_loaded=True)
+        self.assertEqual(self.client.latest.call_count, 2)
+        self.client.fetch_image.assert_called_once()
+        self.assert_installed_png()
+
+    def test_a_removed_latest_picture_is_restored_from_the_cache(self):
+        import marblescape_snapshot as system
+        app.RUN_CONTINUOUSLY = True
+        removed = []
+
+        def sleep(*_args, **_kwargs):
+            if removed:
+                return False
+            # Removed by hand between two checks; the source has nothing newer.
+            for path in app.get_latest_image_files():
+                removed.append(path.name)
+                path.unlink()
+            self.assertIsNone(app.shown_profile_row_id())
+            return True
+
+        with patch.object(app, "sleep_until_next_cycle", side_effect=sleep):
+            app.main([], configuration_loaded=True)
+        self.assertEqual(self.client.latest.call_count, 2)
+        # Back in Latest from the cache, without a second download, and its row is active.
+        self.client.fetch_image.assert_called_once()
+        self.assertEqual([path.name for path in app.get_latest_image_files()], removed)
+        self.assertEqual(app.shown_profile_row_id(), system.SYSTEM_ID)
+        self.assertTrue(any("restoring the current one" in " ".join(map(str, call.args))
+                            for call in self.log.call_args_list))
+
+    def test_matching_frame_reuses_latest_after_runtime_restart(self):
+        app.main(["--once"], configuration_loaded=True)
+        installed = app.get_current_image_path()
+        app.set_current_image_path(None)
+
+        app.main(["--once"], configuration_loaded=True)
+
+        self.assertEqual(self.client.latest.call_count, 2)
+        self.client.fetch_image.assert_called_once()
+        self.assertEqual(app.get_current_image_path(), installed)
+
+    def test_matching_frame_migrates_legacy_latest_state_without_download(self):
+        app.ensure_directories()
+        signature = app.image_cache_configuration_key(app.capture_loaded_configuration())
+        installed = app.save_latest_image(
+            self.make_png({}, (32, 18)),
+            signature,
+            (32, 18),
+            source_time=self.frame["timestamp"],
+        )
+        state_path = app._latest_state_path()
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["version"] = 1
+        state.pop("source_hash", None)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        app.main(["--once"], configuration_loaded=True)
+
+        self.client.latest.assert_called_once()
+        self.client.fetch_image.assert_not_called()
+        self.assertEqual(app.get_current_image_path(), installed)
+        migrated = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(migrated["version"], 2)
+        self.assertEqual(migrated["source_hash"], app.signature_digest(
+            app.noaa_frame_signature(self.frame)
+        ))
+
+    def test_force_refresh_downloads_same_frame_without_duplicate_history(self):
+        app.RUN_CONTINUOUSLY = True
+        app.ENABLE_HISTORY = True
+        cycles = iter((True, False))
+        def next_cycle(*args, **kwargs):
+            more = next(cycles)
+            if more:
+                app.FORCE_UPDATE_EVENT.set()
+            return more
+        with patch.object(app, "sleep_until_next_cycle", side_effect=next_cycle):
+            app.main([], configuration_loaded=True)
+        self.assertEqual(self.client.fetch_image.call_count, 2)
+        self.assert_installed_png()
+        self.assertEqual(list(app.HISTORY_DIR.glob("*.png")), [])
+
+    def test_failed_frame_is_retried_before_signature_is_committed(self):
+        app.RUN_CONTINUOUSLY = True
+        png = self.make_png(self.frame, (32, 18))
+        self.client.fetch_image.side_effect = [RuntimeError("temporary failure"), png]
+        with patch.object(app, "sleep_until_next_cycle", side_effect=[True, False]):
+            app.main([], configuration_loaded=True)
+        self.assertEqual(self.client.fetch_image.call_count, 2)
+        self.assert_installed_png()
+        self.assertEqual(app.IMAGE_STATUS["timestamp"], self.frame["timestamp"])
+        self.assertEqual(app.IMAGE_STATUS["error"], "")
+
+    def test_older_source_timestamp_does_not_replace_newer_installed_frame(self):
+        app.RUN_CONTINUOUSLY = True
+        older = dict(self.frame, timestamp="2026-09-11T11:50:00Z")
+        self.client.latest.side_effect = [self.frame, older]
+        with patch.object(app, "sleep_until_next_cycle", side_effect=[True, False]):
+            app.main([], configuration_loaded=True)
+        self.client.fetch_image.assert_called_once()
+        self.assert_installed_png()
+        self.assertEqual(app.IMAGE_STATUS["timestamp"], self.frame["timestamp"])
+        self.assertIn("older image", app.IMAGE_STATUS["error"])
+
+    def test_fractional_second_advance_is_newer_than_exact_second(self):
+        app.RUN_CONTINUOUSLY = True
+        advanced = dict(self.frame, timestamp="2026-09-11T12:00:00.100000Z")
+        self.client.latest.side_effect = [self.frame, advanced]
+        with patch.object(app, "sleep_until_next_cycle", side_effect=[True, False]):
+            app.main([], configuration_loaded=True)
+        self.assertEqual(self.client.fetch_image.call_count, 2)
+        self.assert_installed_png()
+        self.assertEqual(app.IMAGE_STATUS["timestamp"], advanced["timestamp"])
+        self.assertEqual(app.IMAGE_STATUS["error"], "")
+
+    def test_source_serialization_adds_tables_to_old_toml_and_preserves_wms(self):
+        existing = (
+            '# Keep this comment.\n[service]\nendpoint = "https://example.invalid/wms"\n'
+            '\n[[layers]]\nkind = "wms"\nname = "existing:layer"\nenabled = true\n'
+        )
+        profiles = deepcopy(app.SOURCE_PROFILES)
+        profiles["solar"].update(product="Fe094", resolution="600x600")
+        updated = app.replace_source_configuration(existing, "solar", profiles)
+        parsed = tomllib.loads(updated)
+        self.assertEqual(parsed["source"]["provider"], "solar")
+        self.assertEqual(parsed["sources"]["copernicus"]["gap_fill_mode"],
+                         profiles["copernicus"]["coverage_mode"])
+        self.assertNotIn("coverage_mode", parsed["sources"]["copernicus"])
+        self.assertEqual(
+            {key: value for key, value in parsed["sources"].items()
+             if key != "copernicus"},
+            {key: value for key, value in profiles.items()
+             if key != "copernicus"},
+        )
+        self.assertEqual(parsed["service"]["endpoint"], "https://example.invalid/wms")
+        self.assertEqual(parsed["layers"][0]["name"], "existing:layer")
+        self.assertIn("# Keep this comment.", updated)
+        self.assertNotIn("coverage_mode =", updated)
+        self.assertIn("gap_fill_mode =", updated)
+        repeated = app.replace_source_configuration(updated, "solar", profiles)
+        self.assertEqual(tomllib.loads(repeated), parsed)
+        updates = app.source_configuration_updates("solar", profiles)
+        self.assertEqual(dict(((section, key), value) for section, key, value in updates)[
+            ("sources.solar", "product")
+        ], "Fe094")
+
+    def test_eumetsat_gap_fill_uses_older_passes_then_latest(self):
+        app.IMAGE_SOURCE = "eumetsat"
+        layer_name = "copernicus:sentinel3a_olci_l1_rgb_fullres"
+        app.SOURCE_PROFILES["eumetsat"].update(
+            theme="weather_monitoring",
+            satellite="Sentinel-3A",
+            mission="Sentinel-3",
+            product_type="RGB Composites",
+            layer=layer_name,
+            orbit_type="LEO",
+            fill_gaps=True,
+            gap_fill_lookback_hours=12,
+        )
+        metadata = {
+            "dimensions": {"time": {
+                "default": "2026-09-20T06:15:00Z",
+                "values": (
+                    "2020-02-17T03:01:00.000Z/"
+                    "2026-09-20T06:15:00.000Z/PT1H41M"
+                ),
+            }},
+        }
+        resolved = [{
+            "kind": "wms", "name": layer_name, "style": "", "opacity": 1.0,
+            "time": "2026-09-20T06:15:00Z", "metadata": metadata,
+        }]
+
+        mode, requests = app.build_render_plan(
+            resolved, app.PROJECTIONS["Geographic"], "-90,-180,90,180", 32, 18
+        )
+
+        self.assertEqual(mode, "local")
+        times = [parse_qs(urlparse(item["url"]).query)["time"][0]
+                 for item in requests]
+        self.assertEqual(times[-1], "2026-09-20T06:15:00Z")
+        self.assertEqual(times, sorted(times))
+        self.assertEqual(len(times), 8)
+        self.assertTrue(all(item["role"] == "gap_fill" for item in requests))
+        self.assertTrue(all(
+            parse_qs(urlparse(item["url"]).query)["transparent"] == ["true"]
+            for item in requests
+        ))
+
+    def test_eumetsat_accumulated_layer_cannot_enable_gap_fill(self):
+        profile = app.normalize_eumetsat_profile({
+            "theme": "weather_monitoring",
+            "satellite": "Sentinel-3 (A + B)",
+            "mission": "Sentinel-3",
+            "product_type": "RGB Composites",
+            "layer": "copernicus:daily_sentinel3ab_olci_l1_rgb_fulres",
+            "orbit_type": "LEO",
+            "fill_gaps": True,
+            "gap_fill_lookback_hours": 24,
+        })
+        self.assertFalse(profile["fill_gaps"])
+
+    def test_eumetsat_gap_fill_fetches_latest_first_and_fills_only_transparency(self):
+        requests = [
+            {"label": "oldest", "role": "gap_fill"},
+            {"label": "previous", "role": "gap_fill"},
+            {"label": "latest", "role": "gap_fill"},
+        ]
+        latest = Image.new("RGBA", (2, 1), (0, 0, 0, 0))
+        latest.putpixel((1, 0), (0, 0, 255, 255))
+        previous = Image.new("RGBA", (2, 1), (255, 0, 0, 255))
+        oldest = Image.new("RGBA", (2, 1), (0, 255, 0, 255))
+        images = {"latest": latest, "previous": previous, "oldest": oldest}
+        order = []
+
+        def layer(request, _width, _height):
+            order.append(request["label"])
+            return images[request["label"]].copy(), 10
+
+        app.BACKGROUND_COLOR = "#000000"
+        with patch.object(app, "download_rendered_layer", side_effect=layer):
+            data, downloaded = app.compose_rendered_layers(requests, 2, 1)
+
+        with Image.open(io.BytesIO(data)) as result:
+            self.assertEqual(result.getpixel((0, 0)), (255, 0, 0))
+            self.assertEqual(result.getpixel((1, 0)), (0, 0, 255))
+        self.assertEqual(order, ["latest", "previous"])
+        self.assertEqual(downloaded, 20)
+
+    def test_eumetsat_gap_fill_skips_failed_optional_older_pass(self):
+        requests = [
+            {"label": "oldest", "role": "gap_fill"},
+            {"label": "failed", "role": "gap_fill"},
+            {"label": "latest", "role": "gap_fill"},
+        ]
+        latest = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        oldest = Image.new("RGBA", (1, 1), (0, 255, 0, 255))
+        order = []
+
+        def layer(request, _width, _height):
+            order.append(request["label"])
+            if request["label"] == "failed":
+                raise RuntimeError("temporary server error")
+            image = latest if request["label"] == "latest" else oldest
+            return image.copy(), 10
+
+        app.BACKGROUND_COLOR = "#000000"
+        with patch.object(app, "download_rendered_layer", side_effect=layer):
+            data, downloaded = app.compose_rendered_layers(requests, 1, 1)
+
+        with Image.open(io.BytesIO(data)) as result:
+            self.assertEqual(result.getpixel((0, 0)), (0, 255, 0))
+        self.assertEqual(order, ["latest", "failed", "oldest"])
+        self.assertEqual(downloaded, 20)
+
+    def test_backup_roundtrip_retains_source_profiles(self):
+        profiles = deepcopy(app.SOURCE_PROFILES)
+        profiles["goes_west"].update(product="13", resolution="10848x10848")
+        original = app.DEFAULT_CONFIG_TEMPLATE_PATH.read_text(encoding="utf-8")
+        updated = app.replace_source_configuration(original, "goes_west", profiles)
+        app.ACTIVE_CONFIG_PATH.write_text(updated, encoding="utf-8", newline="")
+        with patch.object(app, "is_windows_startup_enabled", return_value=False):
+            payload = app.create_settings_backup_payload()
+        restored, restored_profiles, startup = app.parse_settings_backup_payload(payload)
+        self.assertFalse(startup)
+        self.assertEqual(restored_profiles, app.IMAGE_PROFILE_LIBRARY)
+        self.assertEqual(restored, updated)
+        self.assertEqual(
+            payload["settings"]["sources"], tomllib.loads(updated)["sources"],
+        )
+        app.IMAGE_SOURCE = "solar"
+        app.load_configuration(app.ACTIVE_CONFIG_PATH)
+        self.assertEqual(app.IMAGE_SOURCE, "goes_west")
+        self.assertEqual(app.SOURCE_PROFILES, profiles)
+
+
+if __name__ == "__main__":
+    unittest.main()

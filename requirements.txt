@@ -1,0 +1,4 @@
+Pillow>=10.3
+pystray>=0.19.5
+certifi>=2026.7.22
+sv-ttk>=2.6.1
