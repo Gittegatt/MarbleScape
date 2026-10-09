@@ -118,6 +118,41 @@ class ProfileTransferTests(unittest.TestCase):
         normalized = strict_settings(settings, app.normalize_image_settings_snapshot)
         self.assertEqual(normalized["sources"]["copernicus"]["map_label_color"], "#000000")
 
+    def test_himawari_profiles_from_before_shorelines_and_centring_export_and_import(self):
+        from marblescape_himawari import DEFAULT_PROFILE as HIMAWARI_DEFAULT
+        from marblescape_profile_transfer import strict_settings
+        later = ("shorelines", "shoreline_color", "center", "latitude", "longitude")
+        for missing in (later, later[:2], later[2:]):
+            with self.subTest(missing=missing):
+                settings = app.default_import_settings()
+                settings["source"]["provider"] = "himawari"
+                himawari = settings["sources"]["himawari"]
+                himawari.update(area="nict_full_disk", product="true_color", resolution="auto")
+                for key in missing:
+                    himawari.pop(key)
+                item = {"id": "3" * 32, "name": "Himawari", "settings": settings}
+                # The saved profile exports, and so does an export file written back then.
+                folder = self.root / "-".join(missing)
+                folder.mkdir()
+                path = export_profiles(folder, [item], app.normalize_image_settings_snapshot)[0]
+                exported = json.loads(path.read_text(encoding="utf-8"))["profiles"][0]["settings"]
+                self.assertEqual({key: exported["sources"]["himawari"][key] for key in later},
+                                 {key: HIMAWARI_DEFAULT[key] for key in later})
+                old_file = portable_settings(settings, app.normalize_image_settings_snapshot)
+                for key in missing:
+                    old_file["sources"]["himawari"].pop(key)
+                self.assertEqual(strict_settings(old_file, app.normalize_image_settings_snapshot), exported)
+        settings = portable_settings(self.items[0]["settings"], app.normalize_image_settings_snapshot)
+        settings["source"]["provider"] = "himawari"
+        settings["sources"] = {"himawari": dict(HIMAWARI_DEFAULT, shorelines=1)}
+        with self.assertRaisesRegex(ValueError, "shorelines must be true or false"):
+            strict_settings(settings, app.normalize_image_settings_snapshot)
+        # Only Himawari gained these fields; other sources still need every field.
+        settings = portable_settings(self.items[0]["settings"], app.normalize_image_settings_snapshot)
+        settings["sources"]["copernicus"].pop("layer")
+        with self.assertRaisesRegex(ValueError, "missing settings.sources.copernicus.layer"):
+            strict_settings(settings, app.normalize_image_settings_snapshot)
+
     def test_exports_from_before_separate_country_borders_import_without_repair(self):
         from marblescape_profile_transfer import strict_settings
         for labels, color in ((True, "#123456"), (False, "#FFFFFF")):

@@ -19,6 +19,7 @@ from PIL import Image
 from marblescape_profiles import MAX_INPUT_BYTES, MAX_PROFILES, MAX_NAME_LENGTH, normalize_library, new_profile_id
 from marblescape_image_metadata import PNG_SIGNATURE, MAX_METADATA_BYTES, SCHEMA_VERSION, SOURCE_LABELS
 from marblescape_copernicus import LEGACY_BLACK_COVERAGE_MODE, get_product, get_layer
+from marblescape_himawari import DEFAULT_PROFILE as HIMAWARI_DEFAULT_PROFILE
 
 
 FORMAT = "MarbleScape profiles"
@@ -26,6 +27,8 @@ VIEW_KEYS = ("projection", "preset", "bbox", "fit_mode", "zoom", "truecolor_blac
 # Output size, background and the Latest folder are device settings, never exported.
 OUTPUT_KEYS = ("render_scale",)
 LAYER_KEYS = ("kind", "name", "enabled", "opacity", "style", "time")
+HIMAWARI_INTRODUCED = {key: HIMAWARI_DEFAULT_PROFILE[key] for key in
+                       ("shorelines", "shoreline_color", "center", "latitude", "longitude")}
 
 
 def portable_settings(settings, validate):
@@ -73,6 +76,10 @@ def strict_settings(settings, validate):
                     introduced["scene_no_data_color"] = (
                         "#000000" if raw.get("coverage_mode") == LEGACY_BLACK_COVERAGE_MODE else "transparent")
                     if path == "settings.sources.copernicus" and key in introduced and value == introduced[key]:
+                        continue
+                    # Added later: old Himawari profiles had no shorelines and no centred view.
+                    if (path == "settings.sources.himawari" and key in HIMAWARI_INTRODUCED
+                            and value == HIMAWARI_INTRODUCED[key]):
                         continue
                     issues.append(f"Incomplete profile: missing {path}.{key}.")
                     continue

@@ -527,6 +527,9 @@ Save button's baseline; a failed write restores `_saved_state`.
   `center` is placed exactly in the middle. Storm areas (`is_storm_area`) render with
   Fit and `storm_view_zoom` (about `STORM_VIEW_KM` across at Zoom 1), and Automatic
   resolution uses the same zoom (`_resolved_profile_resolution`).
+  Profiles and exports from before these keys lack them; `strict_settings` accepts
+  them missing only when the result is the default (`HIMAWARI_INTRODUCED`: off,
+  `#FFFF00`, 0.0/140.7), like the Copernicus keys added later.
   `disk_pixel` is the CGMS geostationary projection (sub-satellite longitude 140.7).
   Unused values (a color while off, coordinates while off) are left out of the image
   cache key, so earlier pictures keep their key. Coastline tiles (the `ffff00` variant,

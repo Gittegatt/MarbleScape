@@ -1281,7 +1281,10 @@ and proposed safe additions first: **Cancel** leaves the library unchanged,
 
 #### Repairing older profiles
 
-Missing rendering fields are never silently defaulted. For known older Copernicus
+Missing rendering fields are never silently defaulted, except settings added later
+whose earlier behavior is known: Himawari profiles saved before **Plot shorelines**
+and **Center on coordinates** existed export and import with both switched off.
+For known older Copernicus
 profiles, missing time-selection fields can be completed with `date_mode =
 catalogue` and inactive offsets of `0`, preserving the saved fixed date or latest
 selection. Known safe defaults for update checks, background color and mosaic

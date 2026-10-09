@@ -273,7 +273,8 @@ authenticity; `rendered_image_sha256` stays informational. The **Image** header'
 
 Optional descriptive fields missing from older records are not invented. Settings
 introduced later use their backward-compatible values (mosaic No-data color white
-`#FFFFFF`, contrast 100%, **Auto** off, image size **Auto**; see the
+`#FFFFFF`, contrast 100%, **Auto** off, image size **Auto**, Himawari shorelines and
+centring off; see the
 [full list](USER_GUIDE.md#repairing-older-profiles)); an explicitly supplied
 malformed value is rejected. Missing legacy Copernicus time-selection fields can be
 completed only with explicit consent when their meaning is unambiguous; the saved
